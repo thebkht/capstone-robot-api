@@ -84,9 +84,8 @@ def test_wifi_connect():
 
 
 def test_camera_stream_chunk():
-    response = client.get("/camera/stream")
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("multipart/x-mixed-replace")
-    chunk = next(response.iter_content(chunk_size=1024))
-    assert b"--frame" in chunk
-    response.close()
+    with client.stream("GET", "/camera/stream") as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("multipart/x-mixed-replace")
+        chunk = next(response.iter_bytes(chunk_size=1024))
+        assert b"--frame" in chunk
