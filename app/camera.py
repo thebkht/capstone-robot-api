@@ -186,7 +186,7 @@ class DepthAICameraSource(CameraSource):
         )
         camera.preview.link(encoder.input)
 
-        xout = pipeline.createXLinkOut()
+        xout = self._create_xlink_out(pipeline)
         xout.setStreamName(self._stream_name)
         encoder.bitstream.link(xout.input)
 
@@ -196,6 +196,28 @@ class DepthAICameraSource(CameraSource):
 
         self._device = device
         self._queue = queue
+
+    def _create_xlink_out(self, pipeline: "dai.Pipeline") -> "dai.Node":
+        """Create an XLinkOut node compatible with multiple DepthAI versions."""
+
+        create = getattr(pipeline, "createXLinkOut", None)
+        if callable(create):
+            try:
+                return create()
+            except AttributeError:
+                # Older DepthAI releases may not expose dai.node.XLinkOut which the
+                # convenience helper relies on. Fall back to manual creation.
+                LOGGER.debug("pipeline.createXLinkOut failed; falling back to manual creation", exc_info=True)
+
+        # Older SDKs expose the node class on the top-level module while newer
+        # versions keep it under dai.node. Check both locations.
+        node_cls = getattr(getattr(dai, "node", dai), "XLinkOut", None)
+        if node_cls is None:
+            raise CameraError(
+                "Installed DepthAI package does not provide the XLinkOut node; please upgrade the 'depthai' dependency."
+            )
+
+        return pipeline.create(node_cls)
 
     def _log_device_connection(self, device: "dai.Device") -> None:
         """Emit diagnostic details about the connected DepthAI device."""
