@@ -155,16 +155,20 @@ class DepthAICameraSource(CameraSource):
         pipeline = dai.Pipeline()
 
         camera = pipeline.createColorCamera()
-        camera.setVideoSize(self._preview_width, self._preview_height)
+        camera.setPreviewSize(self._preview_width, self._preview_height)
+        camera.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
         camera.setInterleaved(False)
         camera.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
         camera.setFps(self._fps)
 
         encoder = pipeline.createVideoEncoder()
         encoder.setDefaultProfilePreset(
-            int(self._fps), dai.VideoEncoderProperties.Profile.MJPEG
+            self._preview_width,
+            self._preview_height,
+            int(self._fps),
+            dai.VideoEncoderProperties.Profile.MJPEG,
         )
-        camera.video.link(encoder.input)
+        camera.preview.link(encoder.input)
 
         xout = pipeline.createXLinkOut()
         xout.setStreamName(self._stream_name)
