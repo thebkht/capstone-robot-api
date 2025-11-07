@@ -51,6 +51,12 @@ class PlaceholderCameraSource(CameraSource):
 class OpenCVCameraSource(CameraSource):
     """Camera source backed by OpenCV video capture."""
 
+    @classmethod
+    def is_available(cls) -> bool:
+        """Return True if the OpenCV dependency is installed."""
+
+        return cv2 is not None
+
     def __init__(
         self,
         device: int | str = 0,
@@ -60,8 +66,10 @@ class OpenCVCameraSource(CameraSource):
         frame_height: Optional[int] = None,
         preferred_fps: Optional[float] = None,
     ) -> None:
-        if cv2 is None:  # pragma: no cover - depends on optional import
-            raise CameraError("OpenCV is not installed")
+        if not self.is_available():  # pragma: no cover - depends on optional import
+            raise CameraError(
+                "OpenCV is not installed. Install the 'opencv-python' package to use the USB camera."
+            )
 
         self._device = device
         self._jpeg_quality = int(jpeg_quality)
@@ -126,6 +134,12 @@ class OpenCVCameraSource(CameraSource):
 class DepthAICameraSource(CameraSource):
     """Camera source that captures MJPEG frames from an OAK-D device."""
 
+    @classmethod
+    def is_available(cls) -> bool:
+        """Return True if the DepthAI dependency is installed."""
+
+        return dai is not None
+
     def __init__(
         self,
         *,
@@ -133,8 +147,10 @@ class DepthAICameraSource(CameraSource):
         preview_height: int = 480,
         fps: float = 30.0,
     ) -> None:
-        if dai is None:  # pragma: no cover - depends on optional import
-            raise CameraError("DepthAI is not installed")
+        if not self.is_available():  # pragma: no cover - depends on optional import
+            raise CameraError(
+                "DepthAI is not installed. Install the 'depthai' package to use the OAK-D camera."
+            )
 
         if preview_width <= 0 or preview_height <= 0:
             raise ValueError("Preview dimensions must be positive")
@@ -155,26 +171,69 @@ class DepthAICameraSource(CameraSource):
         pipeline = dai.Pipeline()
 
         camera = pipeline.createColorCamera()
-        camera.setVideoSize(self._preview_width, self._preview_height)
+        camera.setPreviewSize(self._preview_width, self._preview_height)
+        camera.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
         camera.setInterleaved(False)
         camera.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
         camera.setFps(self._fps)
 
         encoder = pipeline.createVideoEncoder()
         encoder.setDefaultProfilePreset(
-            int(self._fps), dai.VideoEncoderProperties.Profile.MJPEG
+            self._preview_width,
+            self._preview_height,
+            int(self._fps),
+            dai.VideoEncoderProperties.Profile.MJPEG,
         )
-        camera.video.link(encoder.input)
+        camera.preview.link(encoder.input)
 
         xout = pipeline.createXLinkOut()
         xout.setStreamName(self._stream_name)
         encoder.bitstream.link(xout.input)
 
         device = dai.Device(pipeline)
+        self._log_device_connection(device)
         queue = device.getOutputQueue(name=self._stream_name, maxSize=1, blocking=False)
 
         self._device = device
         self._queue = queue
+
+    def _log_device_connection(self, device: "dai.Device") -> None:
+        """Emit diagnostic details about the connected DepthAI device."""
+
+        connected_cameras: list[str] = []
+        try:
+            connected_cameras = [socket.name for socket in device.getConnectedCameras()]
+        except Exception:  # pragma: no cover - best effort logging
+            LOGGER.debug("Unable to query connected cameras from DepthAI device", exc_info=True)
+
+        try:
+            usb_speed = device.getUsbSpeed().name
+        except Exception:  # pragma: no cover - best effort logging
+            usb_speed = "unknown"
+
+        try:
+            device_info = device.getDeviceInfo()
+            mxid = device_info.getMxId() if hasattr(device_info, "getMxId") else getattr(device_info, "mxid", "unknown")
+        except Exception:  # pragma: no cover - best effort logging
+            mxid = "unknown"
+
+        LOGGER.info(
+            "DepthAI device connected (mxid=%s, usb_speed=%s, cameras=%s)",
+            mxid,
+            usb_speed,
+            connected_cameras or ["none"],
+            extra={
+                "mxid": mxid,
+                "usb_speed": usb_speed,
+                "connected_cameras": connected_cameras or ["none"],
+            },
+        )
+
+        if not connected_cameras:
+            LOGGER.warning(
+                "DepthAI device reports no connected cameras; verify the OAK-D is seated and powered",
+                extra={"mxid": mxid},
+            )
 
     async def _ensure_pipeline(self) -> None:
         async with self._lock:
