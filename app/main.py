@@ -38,7 +38,6 @@ ROBOT_NAME = "rover-01"
 BOUNDARY = "frame"
 
 LOGGER = logging.getLogger("uvicorn.error").getChild(__name__)
-LOGGER.setLevel(logging.INFO)
 
 _PLACEHOLDER_JPEG = base64.b64decode(
     """
@@ -122,13 +121,20 @@ async def get_camera_snapshot() -> Response:
 async def get_camera_stream(frames: int | None = Query(default=None, ge=1)) -> StreamingResponse:
     async def stream_generator() -> AsyncIterator[bytes]:
         LOGGER.info("Starting camera stream", extra={"frames": frames})
+        frame_count = 0
         try:
             async for chunk in _camera_stream(app.state.camera_service, frames):
-                LOGGER.info("Emitting camera frame chunk (%d bytes)", len(chunk))
+                frame_count += 1
+                LOGGER.debug("Emitting camera frame chunk (%d bytes)", len(chunk))
                 yield chunk
         except CameraError as exc:
             LOGGER.error("Camera stream interrupted: %s", exc)
             raise HTTPException(status_code=503, detail="Camera stream unavailable") from exc
+        finally:
+            LOGGER.info(
+                "Camera stream finished",
+                extra={"frames": frames, "frames_sent": frame_count},
+            )
 
     return StreamingResponse(stream_generator(), media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY}")
 
