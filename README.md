@@ -44,7 +44,19 @@ To launch the service automatically on your Jetson at boot, install the provided
 
 You can confirm it started successfully with `systemctl status capstone-robot-api.service` and inspect logs via `journalctl -u capstone-robot-api.service`.
 
-After deploying code changes, redeploy the updated files, rerun `./scripts/setup.sh` if you added new dependencies, and then restart the service with `sudo systemctl restart capstone-robot-api.service`.
+### Updating a running deployment
+
+Once the service is installed and enabled you can deploy new versions with the following workflow:
+
+1. Copy the updated repository (or run `git pull`) on the Jetson.
+2. Run `./scripts/setup.sh` if you introduced new dependencies.
+3. Restart the service to pick up the changes:
+
+   ```bash
+   sudo systemctl restart capstone-robot-api.service
+   ```
+
+`scripts/autorun.sh` honours the `LOG_LEVEL` and `LOG_CONFIG` environment variables if you need to adjust logging for troubleshooting. The defaults enable the packaged `scripts/logging.ini`, which surfaces INFO-level camera diagnostics in `journalctl`.
 
 ### Testing
 
