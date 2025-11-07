@@ -170,23 +170,25 @@ class DepthAICameraSource(CameraSource):
 
         pipeline = dai.Pipeline()
 
-        camera = pipeline.createColorCamera()
+        # DepthAI 3.x API uses pipeline.create() with node types
+        camera = pipeline.create(dai.node.ColorCamera)
         camera.setPreviewSize(self._preview_width, self._preview_height)
         camera.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
         camera.setInterleaved(False)
         camera.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
         camera.setFps(self._fps)
 
-        encoder = pipeline.createVideoEncoder()
+        encoder = pipeline.create(dai.node.VideoEncoder)
+        # DepthAI 3.x API: setDefaultProfilePreset only takes fps and profile
+        # Width and height are automatically determined from the input stream
         encoder.setDefaultProfilePreset(
-            self._preview_width,
-            self._preview_height,
-            int(self._fps),
+            self._fps,
             dai.VideoEncoderProperties.Profile.MJPEG,
         )
         camera.preview.link(encoder.input)
 
-        xout = pipeline.createXLinkOut()
+        # In DepthAI 3.x, XLinkOut is created using pipeline.create() with dai.node.XLinkOut
+        xout = pipeline.create(dai.node.XLinkOut)
         xout.setStreamName(self._stream_name)
         encoder.bitstream.link(xout.input)
 
