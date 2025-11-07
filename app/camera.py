@@ -207,19 +207,34 @@ class DepthAICameraSource(CameraSource):
 
         assert dai is not None  # For type checkers
 
+        errors: list[str] = []
+
         node_module = getattr(dai, "node", None)
         if node_module is not None and hasattr(node_module, node_name):
-            return pipeline.create(getattr(node_module, node_name))
+            try:
+                return pipeline.create(getattr(node_module, node_name))
+            except Exception as exc:  # pragma: no cover - depends on SDK internals
+                errors.append(f"pipeline.create(node.{node_name}) failed: {exc}")
 
         top_level_node = getattr(dai, node_name, None)
         if top_level_node is not None:
-            return pipeline.create(top_level_node)
+            try:
+                return pipeline.create(top_level_node)
+            except Exception as exc:  # pragma: no cover - depends on SDK internals
+                errors.append(f"pipeline.create({node_name}) failed: {exc}")
 
         legacy_creator = getattr(pipeline, f"create{node_name}", None)
-        if legacy_creator is not None:
-            return legacy_creator()
+        if callable(legacy_creator):
+            try:
+                return legacy_creator()
+            except Exception as exc:  # pragma: no cover - depends on SDK internals
+                errors.append(f"pipeline.create{node_name}() failed: {exc}")
 
-        raise CameraError(f"DepthAI node '{node_name}' is unavailable in this SDK")
+        error_hint = f"DepthAI node '{node_name}' is unavailable in this SDK"
+        if errors:
+            error_hint = f"{error_hint} ({'; '.join(errors)})"
+
+        raise CameraError(error_hint)
 
     def _log_device_connection(self, device: "dai.Device") -> None:
         """Emit diagnostic details about the connected DepthAI device."""
