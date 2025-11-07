@@ -162,6 +162,20 @@ class CameraService:
             except CameraError as exc:
                 LOGGER.warning("Camera source %s failed: %s", source.__class__.__name__, exc)
                 errors.append(str(exc))
+
+                if source is self._primary and self._fallback is not None:
+                    LOGGER.info(
+                        "Disabling primary camera source after failure; switching to fallback"
+                    )
+                    try:
+                        await source.close()
+                    except Exception:  # pragma: no cover - defensive cleanup
+                        LOGGER.debug(
+                            "Ignored error while closing failed primary camera source",
+                            exc_info=True,
+                        )
+                    self._primary = None
+
                 continue
 
         if errors:
