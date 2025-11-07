@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from .camera import (
     CameraError,
     CameraService,
+    DepthAICameraSource,
     OpenCVCameraSource,
     PlaceholderCameraSource,
 )
@@ -57,10 +58,19 @@ app.add_middleware(
 
 def _create_camera_service() -> CameraService:
     primary_source = None
+
     try:
-        primary_source = OpenCVCameraSource()
+        primary_source = DepthAICameraSource()
+        LOGGER.info("Using DepthAI camera source for streaming")
     except CameraError as exc:
-        LOGGER.warning("OpenCV camera source unavailable: %s", exc)
+        LOGGER.warning("DepthAI camera source unavailable: %s", exc)
+
+    if primary_source is None:
+        try:
+            primary_source = OpenCVCameraSource()
+            LOGGER.info("Using OpenCV camera source for streaming")
+        except CameraError as exc:
+            LOGGER.warning("OpenCV camera source unavailable: %s", exc)
 
     fallback_source = None
     if _PLACEHOLDER_JPEG:

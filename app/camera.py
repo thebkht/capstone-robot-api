@@ -13,6 +13,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
     cv2 = None  # type: ignore
 
+try:
+    import depthai as dai  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    dai = None  # type: ignore
+
 
 LOGGER = logging.getLogger("uvicorn.error").getChild(__name__)
 
@@ -118,6 +123,108 @@ class OpenCVCameraSource(CameraSource):
             await anyio.to_thread.run_sync(capture.release)
 
 
+class DepthAICameraSource(CameraSource):
+    """Camera source that captures MJPEG frames from an OAK-D device."""
+
+    def __init__(
+        self,
+        *,
+        preview_width: int = 640,
+        preview_height: int = 480,
+        fps: float = 30.0,
+    ) -> None:
+        if dai is None:  # pragma: no cover - depends on optional import
+            raise CameraError("DepthAI is not installed")
+
+        if preview_width <= 0 or preview_height <= 0:
+            raise ValueError("Preview dimensions must be positive")
+        if fps <= 0:
+            raise ValueError("FPS must be positive")
+
+        self._preview_width = int(preview_width)
+        self._preview_height = int(preview_height)
+        self._fps = float(fps)
+        self._device: Optional["dai.Device"] = None
+        self._queue: Optional["dai.DataOutputQueue"] = None
+        self._stream_name = "mjpeg"
+        self._lock = asyncio.Lock()
+
+    def _start_pipeline(self) -> None:
+        assert dai is not None  # For type checkers
+
+        pipeline = dai.Pipeline()
+
+        camera = pipeline.createColorCamera()
+        camera.setVideoSize(self._preview_width, self._preview_height)
+        camera.setInterleaved(False)
+        camera.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+        camera.setFps(self._fps)
+
+        encoder = pipeline.createVideoEncoder()
+        encoder.setDefaultProfilePreset(
+            int(self._fps), dai.VideoEncoderProperties.Profile.MJPEG
+        )
+        camera.video.link(encoder.input)
+
+        xout = pipeline.createXLinkOut()
+        xout.setStreamName(self._stream_name)
+        encoder.bitstream.link(xout.input)
+
+        device = dai.Device(pipeline)
+        queue = device.getOutputQueue(name=self._stream_name, maxSize=1, blocking=False)
+
+        self._device = device
+        self._queue = queue
+
+    async def _ensure_pipeline(self) -> None:
+        async with self._lock:
+            if self._queue is not None:
+                return
+
+            try:
+                await anyio.to_thread.run_sync(self._start_pipeline)
+            except Exception as exc:  # pragma: no cover - hardware dependent
+                raise CameraError(f"Unable to start DepthAI camera: {exc}") from exc
+
+            if self._queue is None:  # pragma: no cover - defensive
+                raise CameraError("DepthAI camera queue unavailable")
+
+    def _read_mjpeg_frame(self) -> bytes:
+        if self._queue is None:
+            raise CameraError("DepthAI pipeline has not been started")
+
+        packet = self._queue.get()  # Blocking read in worker thread
+        if packet is None:
+            raise CameraError("No frame received from DepthAI camera")
+
+        data = packet.getData()
+        if not data:
+            raise CameraError("Received empty frame from DepthAI camera")
+
+        return bytes(data)
+
+    async def get_jpeg_frame(self) -> bytes:
+        await self._ensure_pipeline()
+        return await anyio.to_thread.run_sync(self._read_mjpeg_frame)
+
+    def _release_resources(self) -> None:
+        if self._queue is not None:
+            with contextlib.suppress(AttributeError):
+                self._queue.close()
+            self._queue = None
+
+        if self._device is not None:
+            with contextlib.suppress(Exception):
+                self._device.close()
+            self._device = None
+
+    async def close(self) -> None:
+        if self._queue is None and self._device is None:
+            return
+
+        await anyio.to_thread.run_sync(self._release_resources)
+
+
 class CameraService:
     """Provide access to MJPEG frames with automatic fallback handling."""
 
@@ -213,6 +320,7 @@ __all__ = [
     "CameraError",
     "CameraService",
     "CameraSource",
+    "DepthAICameraSource",
     "OpenCVCameraSource",
     "PlaceholderCameraSource",
 ]

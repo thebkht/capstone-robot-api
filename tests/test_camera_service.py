@@ -4,10 +4,12 @@ import asyncio
 
 import pytest
 
+from app import camera as camera_module
 from app.camera import (
     CameraError,
     CameraService,
     CameraSource,
+    DepthAICameraSource,
     PlaceholderCameraSource,
 )
 
@@ -66,3 +68,11 @@ def test_camera_service_disables_failed_primary():
     frame = asyncio.run(service.get_frame())
     assert frame == b"fallback"
     assert failing.calls == 1
+
+
+def test_depthai_camera_source_requires_depthai():
+    if camera_module.dai is not None:  # pragma: no cover - depends on optional hardware
+        pytest.skip("DepthAI library available; cannot test missing dependency")
+
+    with pytest.raises(CameraError):
+        DepthAICameraSource()

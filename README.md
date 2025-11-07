@@ -70,8 +70,8 @@ pytest
 
 - `GET /health` – returns robot connectivity and firmware metadata.
 - `GET /network-info` – exposes current network IP/SSID information.
-- `GET /camera/snapshot` – serves an inline placeholder JPEG snapshot.
-- `GET /camera/stream` – provides an MJPEG stream using placeholder frames.
+- `GET /camera/snapshot` – serves an inline JPEG snapshot from the live camera when available, otherwise the placeholder image.
+- `GET /camera/stream` – provides an MJPEG stream sourced from the DepthAI camera when present, falling back to the placeholder frames.
 - `POST /camera/capture` – simulates capturing a photo and returning saved metadata.
 - `GET /status` – reports mock telemetry, battery, and AI state data.
 - `POST /control/move` – echoes requested linear/angular velocities.
@@ -82,5 +82,5 @@ pytest
 
 ## Development Notes
 
-- Camera endpoints currently serve an in-memory placeholder image; replace `_PLACEHOLDER_JPEG` in `app/main.py` with live camera integration when hardware is available.
+- Camera endpoints automatically prefer an attached OAK-D/DepthAI device and fall back to the placeholder JPEG when no hardware or camera driver is available. Ensure the `depthai` Python package is installed on the target system to enable the live stream.
 - Update the data returned by telemetry and discovery endpoints to reflect real robot values as sensors and subsystems come online.
