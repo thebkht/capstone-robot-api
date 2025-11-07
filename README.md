@@ -32,7 +32,7 @@ By default, the service will be available at `http://127.0.0.1:8000` (or `http:/
 
 To launch the service automatically on your Jetson at boot, install the provided systemd unit from `scripts/capstone-robot-api.service`:
 
-1. Copy the repository to the target location (for example `/opt/capstone-robot-api`).
+1. Copy the repository to the target location (for example `/home/jetson/capstone-robot-api`).
 2. Adjust the `User`, `WorkingDirectory`, and optional `Environment=` lines in `scripts/capstone-robot-api.service` to match your setup.
 3. Install the unit and enable it:
 
@@ -43,6 +43,8 @@ To launch the service automatically on your Jetson at boot, install the provided
    ```
 
 You can confirm it started successfully with `systemctl status capstone-robot-api.service` and inspect logs via `journalctl -u capstone-robot-api.service`.
+
+After deploying code changes, redeploy the updated files, rerun `./scripts/setup.sh` if you added new dependencies, and then restart the service with `sudo systemctl restart capstone-robot-api.service`.
 
 ### Testing
 
