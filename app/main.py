@@ -48,7 +48,10 @@ app.add_middleware(
 )
 
 
-async def placeholder_stream(delay_seconds: float = 0.5) -> AsyncIterator[bytes]:
+async def placeholder_stream(
+    delay_seconds: float = 0.5,
+    max_frames: int | None = None,
+) -> AsyncIterator[bytes]:
     if not _PLACEHOLDER_JPEG:
         raise HTTPException(status_code=500, detail="Camera stream unavailable")
 
@@ -59,8 +62,10 @@ async def placeholder_stream(delay_seconds: float = 0.5) -> AsyncIterator[bytes]
         f"Content-Length: {len(frame)}\r\n\r\n"
     ).encode()
 
-    while True:
+    frames_emitted = 0
+    while max_frames is None or frames_emitted < max_frames:
         yield header + frame + b"\r\n"
+        frames_emitted += 1
         await asyncio.sleep(delay_seconds)
 
 
@@ -85,7 +90,7 @@ async def get_camera_snapshot() -> Response:
 
 @app.get("/camera/stream", tags=["Camera"])
 async def get_camera_stream() -> StreamingResponse:
-    stream = placeholder_stream()
+    stream = placeholder_stream(max_frames=3)
     return StreamingResponse(stream, media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY}")
 
 
