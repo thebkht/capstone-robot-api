@@ -14,7 +14,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
     cv2 = None  # type: ignore
 
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("uvicorn.error").getChild(__name__)
 LOGGER.setLevel(logging.INFO)
 
 

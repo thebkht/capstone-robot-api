@@ -37,7 +37,7 @@ APP_VERSION = "0.1.0"
 ROBOT_NAME = "rover-01"
 BOUNDARY = "frame"
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("uvicorn.error").getChild(__name__)
 LOGGER.setLevel(logging.INFO)
 
 _PLACEHOLDER_JPEG = base64.b64decode(
