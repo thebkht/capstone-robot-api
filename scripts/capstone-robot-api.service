@@ -6,8 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=jetson
-WorkingDirectory=/opt/capstone-robot-api
-ExecStart=/opt/capstone-robot-api/scripts/autorun.sh
+WorkingDirectory=/home/jetson/capstone-robot-api
+ExecStart=/home/jetson/capstone-robot-api/scripts/autorun.sh
 Restart=on-failure
 Environment=HOST=0.0.0.0
 Environment=PORT=8000
