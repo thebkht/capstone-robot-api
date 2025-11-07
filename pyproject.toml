@@ -9,6 +9,8 @@ dependencies = [
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.30.0",
     "httpx>=0.27",
+    "depthai",
+    "opencv-python",
 ]
 
 [project.optional-dependencies]
