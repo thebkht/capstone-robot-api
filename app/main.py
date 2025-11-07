@@ -1,14 +1,21 @@
 from __future__ import annotations
 
-import asyncio
 import base64
+import logging
 from datetime import datetime
 from typing import AsyncIterator
 
-from fastapi import FastAPI, HTTPException, Response
+import anyio
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from .camera import (
+    CameraError,
+    CameraService,
+    OpenCVCameraSource,
+    PlaceholderCameraSource,
+)
 from .models import (
     CaptureRequest,
     CaptureResponse,
@@ -30,13 +37,13 @@ APP_VERSION = "0.1.0"
 ROBOT_NAME = "rover-01"
 BOUNDARY = "frame"
 
+LOGGER = logging.getLogger("uvicorn.error").getChild(__name__)
+
 _PLACEHOLDER_JPEG = base64.b64decode(
     """
 /9j/4AAQSkZJRgABAQAAAQABAAD/2wBDABALDwwMDw8NDhERExUTGBonHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8f/2wBDARESEhgVGBoZGB4dHy8fLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8v/3QAEAA3/2gAIAQEAAD8A/wD/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAsf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/AR//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/AR//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Ar//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IX//2Q==
 """.strip()
 )
-
-
 app = FastAPI(title="Capstone Robot API", version=APP_VERSION)
 
 app.add_middleware(
@@ -48,25 +55,45 @@ app.add_middleware(
 )
 
 
-async def placeholder_stream(
-    delay_seconds: float = 0.5,
-    max_frames: int | None = None,
-) -> AsyncIterator[bytes]:
-    if not _PLACEHOLDER_JPEG:
-        raise HTTPException(status_code=500, detail="Camera stream unavailable")
+def _create_camera_service() -> CameraService:
+    primary_source = None
+    try:
+        primary_source = OpenCVCameraSource()
+    except CameraError as exc:
+        LOGGER.warning("OpenCV camera source unavailable: %s", exc)
 
-    frame = _PLACEHOLDER_JPEG
-    header = (
-        f"--{BOUNDARY}\r\n"
-        "Content-Type: image/jpeg\r\n"
-        f"Content-Length: {len(frame)}\r\n\r\n"
-    ).encode()
+    fallback_source = None
+    if _PLACEHOLDER_JPEG:
+        fallback_source = PlaceholderCameraSource(_PLACEHOLDER_JPEG)
+        LOGGER.info("Using placeholder camera source for fallback frames")
 
-    frames_emitted = 0
-    while max_frames is None or frames_emitted < max_frames:
+    if primary_source is None and fallback_source is None:
+        raise RuntimeError("No camera source available for streaming")
+
+    return CameraService(primary_source, fallback=fallback_source, boundary=BOUNDARY, frame_rate=10.0)
+
+
+app.state.camera_service = _create_camera_service()
+
+
+async def _camera_stream(service: CameraService, frames: int | None) -> AsyncIterator[bytes]:
+    emitted = 0
+    while frames is None or emitted < frames:
+        frame = await service.get_frame()
+        header = (
+            f"--{service.boundary}\r\n"
+            "Content-Type: image/jpeg\r\n"
+            f"Content-Length: {len(frame)}\r\n\r\n"
+        ).encode()
         yield header + frame + b"\r\n"
-        frames_emitted += 1
-        await asyncio.sleep(delay_seconds)
+        emitted += 1
+        if service.frame_delay:
+            await anyio.sleep(service.frame_delay)
+
+
+@app.on_event("shutdown")
+async def shutdown_camera() -> None:
+    await app.state.camera_service.close()
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Discovery"])
@@ -81,17 +108,35 @@ async def get_network_info() -> NetworkInfoResponse:
 
 @app.get("/camera/snapshot", tags=["Camera"])
 async def get_camera_snapshot() -> Response:
-    if not _PLACEHOLDER_JPEG:
-        raise HTTPException(status_code=404, detail="Snapshot unavailable")
+    try:
+        frame = await app.state.camera_service.get_frame()
+    except CameraError as exc:
+        raise HTTPException(status_code=503, detail="Snapshot unavailable") from exc
 
     headers = {"Content-Disposition": "inline; filename=snapshot.jpg"}
-    return Response(content=_PLACEHOLDER_JPEG, media_type="image/jpeg", headers=headers)
+    return Response(content=frame, media_type="image/jpeg", headers=headers)
 
 
 @app.get("/camera/stream", tags=["Camera"])
-async def get_camera_stream() -> StreamingResponse:
-    stream = placeholder_stream(max_frames=3)
-    return StreamingResponse(stream, media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY}")
+async def get_camera_stream(frames: int | None = Query(default=None, ge=1)) -> StreamingResponse:
+    async def stream_generator() -> AsyncIterator[bytes]:
+        LOGGER.info("Starting camera stream", extra={"frames": frames})
+        frame_count = 0
+        try:
+            async for chunk in _camera_stream(app.state.camera_service, frames):
+                frame_count += 1
+                LOGGER.debug("Emitting camera frame chunk (%d bytes)", len(chunk))
+                yield chunk
+        except CameraError as exc:
+            LOGGER.error("Camera stream interrupted: %s", exc)
+            raise HTTPException(status_code=503, detail="Camera stream unavailable") from exc
+        finally:
+            LOGGER.info(
+                "Camera stream finished",
+                extra={"frames": frames, "frames_sent": frame_count},
+            )
+
+    return StreamingResponse(stream_generator(), media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY}")
 
 
 @app.post("/camera/capture", response_model=CaptureResponse, tags=["Camera"])
