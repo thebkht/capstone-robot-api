@@ -30,28 +30,19 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 By default, the service will be available at `http://127.0.0.1:8000` (or `http://192.168.4.1:8000` when running on the robot hotspot).
 
-To launch the service automatically on your Jetson at boot, point a systemd unit (or another init mechanism) at `scripts/autorun.sh`.
-A sample systemd unit might look like:
+To launch the service automatically on your Jetson at boot, install the provided systemd unit from `scripts/capstone-robot-api.service`:
 
-```ini
-[Unit]
-Description=Capstone Robot API
-After=network-online.target
+1. Copy the repository to the target location (for example `/opt/capstone-robot-api`).
+2. Adjust the `User`, `WorkingDirectory`, and optional `Environment=` lines in `scripts/capstone-robot-api.service` to match your setup.
+3. Install the unit and enable it:
 
-[Service]
-Type=simple
-User=jetson
-WorkingDirectory=/opt/capstone-robot-api
-ExecStart=/opt/capstone-robot-api/scripts/autorun.sh
-Restart=on-failure
-Environment=HOST=0.0.0.0
-Environment=PORT=8000
+   ```bash
+   sudo cp scripts/capstone-robot-api.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now capstone-robot-api.service
+   ```
 
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable the unit with `sudo systemctl enable --now capstone-robot-api.service` after copying the repository to the target location.
+You can confirm it started successfully with `systemctl status capstone-robot-api.service` and inspect logs via `journalctl -u capstone-robot-api.service`.
 
 ### Testing
 
