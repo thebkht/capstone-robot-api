@@ -66,7 +66,7 @@ def _create_camera_service() -> CameraService:
         except CameraError as exc:
             LOGGER.warning("DepthAI camera source unavailable: %s", exc)
     else:
-        LOGGER.info(
+        LOGGER.warning(
             "DepthAI package not installed; skipping OAK-D camera stream. Install the 'depthai' package to enable it."
         )
 
@@ -78,7 +78,7 @@ def _create_camera_service() -> CameraService:
             except CameraError as exc:
                 LOGGER.warning("OpenCV camera source unavailable: %s", exc)
         else:
-            LOGGER.info(
+            LOGGER.warning(
                 "OpenCV package not installed; skipping USB camera stream. Install the 'opencv-python' package to enable it."
             )
 
