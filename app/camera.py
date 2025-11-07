@@ -211,6 +211,10 @@ class DepthAICameraSource(CameraSource):
         if node_module is not None and hasattr(node_module, node_name):
             return pipeline.create(getattr(node_module, node_name))
 
+        top_level_node = getattr(dai, node_name, None)
+        if top_level_node is not None:
+            return pipeline.create(top_level_node)
+
         legacy_creator = getattr(pipeline, f"create{node_name}", None)
         if legacy_creator is not None:
             return legacy_creator()
