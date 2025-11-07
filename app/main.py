@@ -59,18 +59,28 @@ app.add_middleware(
 def _create_camera_service() -> CameraService:
     primary_source = None
 
-    try:
-        primary_source = DepthAICameraSource()
-        LOGGER.info("Using DepthAI camera source for streaming")
-    except CameraError as exc:
-        LOGGER.warning("DepthAI camera source unavailable: %s", exc)
+    if DepthAICameraSource.is_available():
+        try:
+            primary_source = DepthAICameraSource()
+            LOGGER.info("Using DepthAI camera source for streaming")
+        except CameraError as exc:
+            LOGGER.warning("DepthAI camera source unavailable: %s", exc)
+    else:
+        LOGGER.error(
+            "DepthAI support is unavailable. Install the 'depthai' package to enable the OAK-D camera stream."
+        )
 
     if primary_source is None:
-        try:
-            primary_source = OpenCVCameraSource()
-            LOGGER.info("Using OpenCV camera source for streaming")
-        except CameraError as exc:
-            LOGGER.warning("OpenCV camera source unavailable: %s", exc)
+        if OpenCVCameraSource.is_available():
+            try:
+                primary_source = OpenCVCameraSource()
+                LOGGER.info("Using OpenCV camera source for streaming")
+            except CameraError as exc:
+                LOGGER.warning("OpenCV camera source unavailable: %s", exc)
+        else:
+            LOGGER.error(
+                "OpenCV support is unavailable. Install the 'opencv-python' package to enable USB camera streaming."
+            )
 
     fallback_source = None
     if _PLACEHOLDER_JPEG:

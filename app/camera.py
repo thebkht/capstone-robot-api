@@ -51,6 +51,12 @@ class PlaceholderCameraSource(CameraSource):
 class OpenCVCameraSource(CameraSource):
     """Camera source backed by OpenCV video capture."""
 
+    @classmethod
+    def is_available(cls) -> bool:
+        """Return True if the OpenCV dependency is installed."""
+
+        return cv2 is not None
+
     def __init__(
         self,
         device: int | str = 0,
@@ -60,8 +66,10 @@ class OpenCVCameraSource(CameraSource):
         frame_height: Optional[int] = None,
         preferred_fps: Optional[float] = None,
     ) -> None:
-        if cv2 is None:  # pragma: no cover - depends on optional import
-            raise CameraError("OpenCV is not installed")
+        if not self.is_available():  # pragma: no cover - depends on optional import
+            raise CameraError(
+                "OpenCV is not installed. Install the 'opencv-python' package to use the USB camera."
+            )
 
         self._device = device
         self._jpeg_quality = int(jpeg_quality)
@@ -126,6 +134,12 @@ class OpenCVCameraSource(CameraSource):
 class DepthAICameraSource(CameraSource):
     """Camera source that captures MJPEG frames from an OAK-D device."""
 
+    @classmethod
+    def is_available(cls) -> bool:
+        """Return True if the DepthAI dependency is installed."""
+
+        return dai is not None
+
     def __init__(
         self,
         *,
@@ -133,8 +147,10 @@ class DepthAICameraSource(CameraSource):
         preview_height: int = 480,
         fps: float = 30.0,
     ) -> None:
-        if dai is None:  # pragma: no cover - depends on optional import
-            raise CameraError("DepthAI is not installed")
+        if not self.is_available():  # pragma: no cover - depends on optional import
+            raise CameraError(
+                "DepthAI is not installed. Install the 'depthai' package to use the OAK-D camera."
+            )
 
         if preview_width <= 0 or preview_height <= 0:
             raise ValueError("Preview dimensions must be positive")
