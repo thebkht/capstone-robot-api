@@ -1,0 +1,16 @@
+[Unit]
+Description=Capstone Robot API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jetson
+WorkingDirectory=/opt/capstone-robot-api
+ExecStart=/opt/capstone-robot-api/scripts/autorun.sh
+Restart=on-failure
+Environment=HOST=0.0.0.0
+Environment=PORT=8000
+
+[Install]
+WantedBy=multi-user.target
