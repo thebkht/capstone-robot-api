@@ -170,15 +170,17 @@ class DepthAICameraSource(CameraSource):
 
         pipeline = dai.Pipeline()
 
-        # DepthAI 3.x API uses pipeline.create() with node types
-        camera = pipeline.create(dai.node.ColorCamera)
+        # DepthAI 3.x API uses pipeline.create() with node types. Earlier versions
+        # expose helpers such as createColorCamera instead. Support both styles so
+        # the service works across DepthAI releases.
+        camera = self._create_node(pipeline, "ColorCamera")
         camera.setPreviewSize(self._preview_width, self._preview_height)
         camera.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
         camera.setInterleaved(False)
         camera.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
         camera.setFps(self._fps)
 
-        encoder = pipeline.create(dai.node.VideoEncoder)
+        encoder = self._create_node(pipeline, "VideoEncoder")
         # DepthAI 3.x API: setDefaultProfilePreset only takes fps and profile
         # Width and height are automatically determined from the input stream
         encoder.setDefaultProfilePreset(
@@ -187,8 +189,9 @@ class DepthAICameraSource(CameraSource):
         )
         camera.preview.link(encoder.input)
 
-        # In DepthAI 3.x, XLinkOut is created using pipeline.create() with dai.node.XLinkOut
-        xout = pipeline.create(dai.node.XLinkOut)
+        # In DepthAI 3.x, XLinkOut is created using pipeline.create() with dai.node.XLinkOut.
+        # Fall back to the legacy createXLinkOut helper when the node class is absent.
+        xout = self._create_node(pipeline, "XLinkOut")
         xout.setStreamName(self._stream_name)
         encoder.bitstream.link(xout.input)
 
@@ -198,6 +201,21 @@ class DepthAICameraSource(CameraSource):
 
         self._device = device
         self._queue = queue
+
+    def _create_node(self, pipeline: "dai.Pipeline", node_name: str):
+        """Create a DepthAI node, supporting both legacy and modern APIs."""
+
+        assert dai is not None  # For type checkers
+
+        node_module = getattr(dai, "node", None)
+        if node_module is not None and hasattr(node_module, node_name):
+            return pipeline.create(getattr(node_module, node_name))
+
+        legacy_creator = getattr(pipeline, f"create{node_name}", None)
+        if legacy_creator is not None:
+            return legacy_creator()
+
+        raise CameraError(f"DepthAI node '{node_name}' is unavailable in this SDK")
 
     def _log_device_connection(self, device: "dai.Device") -> None:
         """Emit diagnostic details about the connected DepthAI device."""
