@@ -151,7 +151,13 @@ class CameraService:
             if source is None:
                 continue
             try:
-                return await source.get_jpeg_frame()
+                frame = await source.get_jpeg_frame()
+                LOGGER.debug(
+                    "Fetched frame from %s (%d bytes)",
+                    source.__class__.__name__,
+                    len(frame),
+                )
+                return frame
             except CameraError as exc:
                 LOGGER.warning("Camera source %s failed: %s", source.__class__.__name__, exc)
                 errors.append(str(exc))

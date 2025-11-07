@@ -65,6 +65,7 @@ def _create_camera_service() -> CameraService:
     fallback_source = None
     if _PLACEHOLDER_JPEG:
         fallback_source = PlaceholderCameraSource(_PLACEHOLDER_JPEG)
+        LOGGER.info("Using placeholder camera source for fallback frames")
 
     if primary_source is None and fallback_source is None:
         raise RuntimeError("No camera source available for streaming")
@@ -119,8 +120,10 @@ async def get_camera_snapshot() -> Response:
 @app.get("/camera/stream", tags=["Camera"])
 async def get_camera_stream(frames: int | None = Query(default=None, ge=1)) -> StreamingResponse:
     async def stream_generator() -> AsyncIterator[bytes]:
+        LOGGER.info("Starting camera stream", extra={"frames": frames})
         try:
             async for chunk in _camera_stream(app.state.camera_service, frames):
+                LOGGER.debug("Emitting camera frame chunk (%d bytes)", len(chunk))
                 yield chunk
         except CameraError as exc:
             LOGGER.error("Camera stream interrupted: %s", exc)
