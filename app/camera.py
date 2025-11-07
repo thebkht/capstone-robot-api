@@ -191,10 +191,49 @@ class DepthAICameraSource(CameraSource):
         encoder.bitstream.link(xout.input)
 
         device = dai.Device(pipeline)
+        self._log_device_connection(device)
         queue = device.getOutputQueue(name=self._stream_name, maxSize=1, blocking=False)
 
         self._device = device
         self._queue = queue
+
+    def _log_device_connection(self, device: "dai.Device") -> None:
+        """Emit diagnostic details about the connected DepthAI device."""
+
+        connected_cameras: list[str] = []
+        try:
+            connected_cameras = [socket.name for socket in device.getConnectedCameras()]
+        except Exception:  # pragma: no cover - best effort logging
+            LOGGER.debug("Unable to query connected cameras from DepthAI device", exc_info=True)
+
+        try:
+            usb_speed = device.getUsbSpeed().name
+        except Exception:  # pragma: no cover - best effort logging
+            usb_speed = "unknown"
+
+        try:
+            device_info = device.getDeviceInfo()
+            mxid = device_info.getMxId() if hasattr(device_info, "getMxId") else getattr(device_info, "mxid", "unknown")
+        except Exception:  # pragma: no cover - best effort logging
+            mxid = "unknown"
+
+        LOGGER.info(
+            "DepthAI device connected (mxid=%s, usb_speed=%s, cameras=%s)",
+            mxid,
+            usb_speed,
+            connected_cameras or ["none"],
+            extra={
+                "mxid": mxid,
+                "usb_speed": usb_speed,
+                "connected_cameras": connected_cameras or ["none"],
+            },
+        )
+
+        if not connected_cameras:
+            LOGGER.warning(
+                "DepthAI device reports no connected cameras; verify the OAK-D is seated and powered",
+                extra={"mxid": mxid},
+            )
 
     async def _ensure_pipeline(self) -> None:
         async with self._lock:
