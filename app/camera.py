@@ -15,6 +15,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 
 
 LOGGER = logging.getLogger(__name__)
+LOGGER.setLevel(logging.INFO)
 
 
 class CameraError(RuntimeError):
@@ -152,7 +153,7 @@ class CameraService:
                 continue
             try:
                 frame = await source.get_jpeg_frame()
-                LOGGER.debug(
+                LOGGER.info(
                     "Fetched frame from %s (%d bytes)",
                     source.__class__.__name__,
                     len(frame),

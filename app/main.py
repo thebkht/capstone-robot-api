@@ -38,6 +38,7 @@ ROBOT_NAME = "rover-01"
 BOUNDARY = "frame"
 
 LOGGER = logging.getLogger(__name__)
+LOGGER.setLevel(logging.INFO)
 
 _PLACEHOLDER_JPEG = base64.b64decode(
     """
@@ -123,7 +124,7 @@ async def get_camera_stream(frames: int | None = Query(default=None, ge=1)) -> S
         LOGGER.info("Starting camera stream", extra={"frames": frames})
         try:
             async for chunk in _camera_stream(app.state.camera_service, frames):
-                LOGGER.debug("Emitting camera frame chunk (%d bytes)", len(chunk))
+                LOGGER.info("Emitting camera frame chunk (%d bytes)", len(chunk))
                 yield chunk
         except CameraError as exc:
             LOGGER.error("Camera stream interrupted: %s", exc)
