@@ -208,6 +208,7 @@ class DepthAICameraSource(CameraSource):
         assert dai is not None  # For type checkers
 
         errors: list[str] = []
+        diagnostics: list[str] = []
 
         node_module = getattr(dai, "node", None)
         if node_module is not None and hasattr(node_module, node_name):
@@ -215,6 +216,8 @@ class DepthAICameraSource(CameraSource):
                 return pipeline.create(getattr(node_module, node_name))
             except Exception as exc:  # pragma: no cover - depends on SDK internals
                 errors.append(f"pipeline.create(node.{node_name}) failed: {exc}")
+        else:
+            diagnostics.append(f"dai.node.{node_name}: missing")
 
         top_level_node = getattr(dai, node_name, None)
         if top_level_node is not None:
@@ -222,6 +225,8 @@ class DepthAICameraSource(CameraSource):
                 return pipeline.create(top_level_node)
             except Exception as exc:  # pragma: no cover - depends on SDK internals
                 errors.append(f"pipeline.create({node_name}) failed: {exc}")
+        else:
+            diagnostics.append(f"dai.{node_name}: missing")
 
         legacy_creator = getattr(pipeline, f"create{node_name}", None)
         if callable(legacy_creator):
@@ -229,10 +234,25 @@ class DepthAICameraSource(CameraSource):
                 return legacy_creator()
             except Exception as exc:  # pragma: no cover - depends on SDK internals
                 errors.append(f"pipeline.create{node_name}() failed: {exc}")
+        else:
+            diagnostics.append(f"pipeline.create{node_name}(): missing")
+
+        diagnostics_message = ", ".join(sorted(diagnostics)) or None
 
         error_hint = f"DepthAI node '{node_name}' is unavailable in this SDK"
         if errors:
             error_hint = f"{error_hint} ({'; '.join(errors)})"
+
+        depthai_version = getattr(dai, "__version__", "unknown")
+        diagnostic_parts = [f"DepthAI version: {depthai_version}"]
+        if diagnostics_message:
+            diagnostic_parts.append(diagnostics_message)
+
+        LOGGER.warning(
+            "DepthAI diagnostics for missing node %s: %s",
+            node_name,
+            "; ".join(diagnostic_parts),
+        )
 
         raise CameraError(error_hint)
 
