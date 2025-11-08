@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+from pathlib import Path
 from datetime import datetime
 from typing import AsyncIterator
 
@@ -70,6 +71,46 @@ _FORCE_WEBCAM = _get_env_flag("CAMERA_FORCE_WEBCAM")
 _WEBCAM_DEVICE = os.getenv("CAMERA_WEBCAM_DEVICE")
 
 
+def _iter_webcam_candidates() -> list[int | str]:
+    """Return preferred webcam device identifiers.
+
+    The order favours explicit configuration, then any OAK-D UVC interfaces,
+    and finally generic `/dev/video*` indices so we still try something when no
+    metadata is available.
+    """
+
+    candidates: list[int | str] = []
+
+    if _WEBCAM_DEVICE is not None:
+        try:
+            candidates.append(int(_WEBCAM_DEVICE))
+        except ValueError:
+            candidates.append(_WEBCAM_DEVICE)
+
+    by_id_dir = Path("/dev/v4l/by-id")
+    if by_id_dir.is_dir():
+        for entry in sorted(by_id_dir.iterdir()):
+            name = entry.name.lower()
+            if "oak" not in name and "depthai" not in name and "luxonis" not in name:
+                continue
+            try:
+                resolved = entry.resolve(strict=True)
+            except OSError:
+                continue
+            candidates.append(str(resolved))
+
+    # Fall back to common numeric indices if nothing more specific was found.
+    # These entries are appended after any explicit or detected OAK-D devices
+    # so that laptops with built-in webcams still prefer the external device
+    # when one is present.
+    generic_indices = range(0, 4)
+    for index in generic_indices:
+        if index not in candidates:
+            candidates.append(index)
+
+    return candidates
+
+
 def _create_camera_service() -> CameraService:
     primary_source = None
 
@@ -90,23 +131,26 @@ def _create_camera_service() -> CameraService:
 
     if primary_source is None:
         if OpenCVCameraSource.is_available():
-            try:
-                if _WEBCAM_DEVICE is not None:
+            for candidate in _iter_webcam_candidates():
+                try:
                     LOGGER.info(
-                        "Opening webcam device %s as primary stream source (CAMERA_WEBCAM_DEVICE)",
-                        _WEBCAM_DEVICE,
+                        "Attempting webcam device %s for primary stream source",
+                        candidate,
                     )
-                    device: int | str
-                    try:
-                        device = int(_WEBCAM_DEVICE)
-                    except ValueError:
-                        device = _WEBCAM_DEVICE
-                    primary_source = OpenCVCameraSource(device=device)
+                    primary_source = OpenCVCameraSource(device=candidate)
+                except CameraError as exc:
+                    LOGGER.warning(
+                        "OpenCV camera source unavailable on %s: %s",
+                        candidate,
+                        exc,
+                    )
+                    primary_source = None
+                    continue
                 else:
-                    primary_source = OpenCVCameraSource()
-                LOGGER.info("Using OpenCV camera source for streaming")
-            except CameraError as exc:
-                LOGGER.warning("OpenCV camera source unavailable: %s", exc)
+                    LOGGER.info("Using OpenCV camera source for streaming")
+                    break
+            else:
+                LOGGER.warning("Unable to open any webcam device for streaming")
         else:
             LOGGER.warning(
                 "OpenCV package not installed; skipping USB camera stream. Install the 'opencv-python' package to enable it."

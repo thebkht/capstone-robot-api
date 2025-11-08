@@ -39,7 +39,7 @@ export CAMERA_FORCE_WEBCAM=1          # Skip DepthAI initialisation entirely
 export CAMERA_WEBCAM_DEVICE=/dev/video2  # Optional: explicit device path or index
 ```
 
-When `CAMERA_FORCE_WEBCAM` is enabled the API ignores the DepthAI SDK and opens the camera just like a standard webcam via OpenCV.
+When `CAMERA_FORCE_WEBCAM` is enabled the API ignores the DepthAI SDK and opens the camera just like a standard webcam via OpenCV. When no device override is provided the service scans `/dev/v4l/by-id` for entries containing `oak`, `depthai`, or `luxonis` so an attached OAK-D Lite in UVC mode is automatically preferred before falling back to generic `/dev/video*` indices.
 
 To launch the service automatically on your Jetson at boot, install the provided systemd unit from `scripts/capstone-robot-api.service`:
 
