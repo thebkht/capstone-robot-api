@@ -166,7 +166,9 @@ class DepthAICameraSource(CameraSource):
         self._fps = float(fps)
         self._device: Optional["dai.Device"] = None
         self._queue: Optional[Any] = None
-        self._stream_name = "mjpeg"
+        # Match the default stream name used by the simple OAK-D setup snippet so
+        # diagnostics remain familiar to operators capturing the "rgb" queue.
+        self._stream_name = "rgb"
         self._lock = asyncio.Lock()
 
     def _start_pipeline(self) -> None:
@@ -185,16 +187,23 @@ class DepthAICameraSource(CameraSource):
         pipeline = dai.Pipeline()
 
         # DepthAI 3.x API uses pipeline.create() with node types. Earlier versions
-        # expose helpers such as createColorCamera instead. Support both styles so
-        # the service works across DepthAI releases.
-        camera = self._create_node(pipeline, "ColorCamera")
+        # expose helpers such as createColorCamera instead. Prefer the modern
+        # node-style construction path that mirrors Luxonis' reference examples
+        # and fall back to the compatibility helper when unavailable.
+        if hasattr(dai, "node") and hasattr(dai.node, "ColorCamera"):
+            camera = pipeline.create(dai.node.ColorCamera)
+        else:
+            camera = self._create_node(pipeline, "ColorCamera")
         camera.setPreviewSize(self._preview_width, self._preview_height)
         camera.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
         camera.setInterleaved(False)
         camera.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
         camera.setFps(self._fps)
 
-        encoder = self._create_node(pipeline, "VideoEncoder")
+        if hasattr(dai, "node") and hasattr(dai.node, "VideoEncoder"):
+            encoder = pipeline.create(dai.node.VideoEncoder)
+        else:
+            encoder = self._create_node(pipeline, "VideoEncoder")
         # DepthAI 3.x API: setDefaultProfilePreset only takes fps and profile
         # Width and height are automatically determined from the input stream
         encoder.setDefaultProfilePreset(
@@ -266,7 +275,10 @@ class DepthAICameraSource(CameraSource):
         assert dai is not None  # For type checkers
 
         try:
-            xout = self._create_node(pipeline, "XLinkOut")
+            if hasattr(dai, "node") and hasattr(dai.node, "XLinkOut"):
+                xout = pipeline.create(dai.node.XLinkOut)
+            else:
+                xout = self._create_node(pipeline, "XLinkOut")
         except CameraError as exc:
             LOGGER.info(
                 "DepthAI XLinkOut node unavailable; using direct output queue (reason: %s)",
