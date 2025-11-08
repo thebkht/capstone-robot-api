@@ -30,6 +30,17 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 By default, the service will be available at `http://127.0.0.1:8000` (or `http://192.168.4.1:8000` when running on the robot hotspot).
 
+#### Forcing USB webcam mode
+
+If you only need MJPEG streaming from a USB camera (including the OAK-D operating in UVC mode) set the following environment variables in your shell or systemd unit before starting the service:
+
+```bash
+export CAMERA_FORCE_WEBCAM=1          # Skip DepthAI initialisation entirely
+export CAMERA_WEBCAM_DEVICE=/dev/video2  # Optional: explicit device path or index
+```
+
+When `CAMERA_FORCE_WEBCAM` is enabled the API ignores the DepthAI SDK and opens the camera just like a standard webcam via OpenCV.
+
 To launch the service automatically on your Jetson at boot, install the provided systemd unit from `scripts/capstone-robot-api.service`:
 
 1. Copy the repository to the target location (for example `/home/jetson/capstone-robot-api`).
@@ -82,5 +93,5 @@ pytest
 
 ## Development Notes
 
-- Camera endpoints automatically prefer an attached OAK-D/DepthAI device and fall back to the placeholder JPEG when no hardware or camera driver is available. Ensure the `depthai` Python package is installed on the target system to enable the live stream.
+- Camera endpoints automatically prefer an attached OAK-D/DepthAI device unless `CAMERA_FORCE_WEBCAM=1` is set. In webcam mode the service captures frames from the specified USB device (default `0`) using OpenCV.
 - Update the data returned by telemetry and discovery endpoints to reflect real robot values as sensors and subsystems come online.

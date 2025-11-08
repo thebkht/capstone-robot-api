@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from datetime import datetime
 from typing import AsyncIterator
 
@@ -56,10 +57,27 @@ app.add_middleware(
 )
 
 
+def _get_env_flag(name: str) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return False
+
+    normalized = value.strip().lower()
+    return normalized in {"1", "true", "yes", "on"}
+
+
+_FORCE_WEBCAM = _get_env_flag("CAMERA_FORCE_WEBCAM")
+_WEBCAM_DEVICE = os.getenv("CAMERA_WEBCAM_DEVICE")
+
+
 def _create_camera_service() -> CameraService:
     primary_source = None
 
-    if DepthAICameraSource.is_available():
+    if _FORCE_WEBCAM:
+        LOGGER.info(
+            "DepthAI camera explicitly disabled via CAMERA_FORCE_WEBCAM; attempting USB webcam sources instead",
+        )
+    elif DepthAICameraSource.is_available():
         try:
             primary_source = DepthAICameraSource()
             LOGGER.info("Using DepthAI camera source for streaming")
@@ -73,7 +91,19 @@ def _create_camera_service() -> CameraService:
     if primary_source is None:
         if OpenCVCameraSource.is_available():
             try:
-                primary_source = OpenCVCameraSource()
+                if _WEBCAM_DEVICE is not None:
+                    LOGGER.info(
+                        "Opening webcam device %s as primary stream source (CAMERA_WEBCAM_DEVICE)",
+                        _WEBCAM_DEVICE,
+                    )
+                    device: int | str
+                    try:
+                        device = int(_WEBCAM_DEVICE)
+                    except ValueError:
+                        device = _WEBCAM_DEVICE
+                    primary_source = OpenCVCameraSource(device=device)
+                else:
+                    primary_source = OpenCVCameraSource()
                 LOGGER.info("Using OpenCV camera source for streaming")
             except CameraError as exc:
                 LOGGER.warning("OpenCV camera source unavailable: %s", exc)
