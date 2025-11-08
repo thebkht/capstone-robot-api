@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
+import inspect
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import AsyncIterator, Iterable, Optional
+from typing import AsyncIterator, Optional
 
 import anyio
 
@@ -210,34 +213,128 @@ class DepthAICameraSource(CameraSource):
         errors: list[str] = []
         diagnostics: list[str] = []
 
-        node_module = getattr(dai, "node", None)
-        if node_module is not None and hasattr(node_module, node_name):
+        def _attempt(description: str, factory):
             try:
-                return pipeline.create(getattr(node_module, node_name))
+                return factory()
             except Exception as exc:  # pragma: no cover - depends on SDK internals
-                errors.append(f"pipeline.create(node.{node_name}) failed: {exc}")
-        else:
-            diagnostics.append(f"dai.node.{node_name}: missing")
+                errors.append(f"{description} failed: {exc}")
+                return None
+
+        def _snake_case(name: str) -> str:
+            result: list[str] = []
+            for index, char in enumerate(name):
+                if char.isupper() and index > 0 and not name[index - 1].isupper():
+                    result.append("_")
+                result.append(char.lower())
+            return "".join(result)
+
+        def _find_node_class(module) -> Optional[type]:
+            visited: set[int] = set()
+
+            def _walk(candidate_module) -> Optional[type]:
+                module_id = id(candidate_module)
+                if module_id in visited:
+                    return None
+                visited.add(module_id)
+
+                try:
+                    direct = getattr(candidate_module, node_name)
+                except AttributeError:
+                    direct = None
+
+                if inspect.isclass(direct):
+                    return direct
+
+                exported = getattr(candidate_module, "__all__", None)
+                names = exported if isinstance(exported, Iterable) else dir(candidate_module)
+                for attr_name in names:
+                    if attr_name.startswith("_"):
+                        continue
+                    try:
+                        attr = getattr(candidate_module, attr_name)
+                    except AttributeError:
+                        continue
+                    if inspect.isclass(attr) and attr.__name__ == node_name:
+                        return attr
+                    if inspect.ismodule(attr):
+                        found = _walk(attr)
+                        if found is not None:
+                            return found
+                return None
+
+            return _walk(module)
+
+        node_module = getattr(dai, "node", None)
+        imported_node_module = None
+
+        if node_module is None:
+            try:
+                imported_node_module = importlib.import_module("depthai.node")
+            except ModuleNotFoundError:
+                diagnostics.append("depthai.node module: missing")
+            except Exception as exc:  # pragma: no cover - depends on SDK internals
+                diagnostics.append(f"depthai.node module import failed: {exc}")
+            else:
+                node_module = imported_node_module
+
+        if node_module is not None:
+            direct_class = getattr(node_module, node_name, None)
+            if direct_class is not None:
+                result = _attempt(f"pipeline.create(node.{node_name})", lambda: pipeline.create(direct_class))
+                if result is not None:
+                    return result
+            else:
+                diagnostics.append(f"dai.node.{node_name}: missing")
+
+            discovered_class = _find_node_class(node_module)
+            if discovered_class is not None and discovered_class is not direct_class:
+                result = _attempt(
+                    f"pipeline.create(node.*.{node_name})",
+                    lambda: pipeline.create(discovered_class),
+                )
+                if result is not None:
+                    return result
+        elif imported_node_module is None:
+            diagnostics.append("dai.node: missing")
 
         top_level_node = getattr(dai, node_name, None)
         if top_level_node is not None:
-            try:
-                return pipeline.create(top_level_node)
-            except Exception as exc:  # pragma: no cover - depends on SDK internals
-                errors.append(f"pipeline.create({node_name}) failed: {exc}")
+            result = _attempt(f"pipeline.create({node_name})", lambda: pipeline.create(top_level_node))
+            if result is not None:
+                return result
         else:
             diagnostics.append(f"dai.{node_name}: missing")
 
         legacy_creator = getattr(pipeline, f"create{node_name}", None)
         if callable(legacy_creator):
-            try:
-                return legacy_creator()
-            except Exception as exc:  # pragma: no cover - depends on SDK internals
-                errors.append(f"pipeline.create{node_name}() failed: {exc}")
+            result = _attempt(f"pipeline.create{node_name}()", legacy_creator)
+            if result is not None:
+                return result
         else:
             diagnostics.append(f"pipeline.create{node_name}(): missing")
 
-        diagnostics_message = ", ".join(sorted(diagnostics)) or None
+        snake_name = _snake_case(node_name)
+        if snake_name:
+            module_path = f"depthai.node.{snake_name}"
+            try:
+                snake_module = importlib.import_module(module_path)
+            except ModuleNotFoundError:
+                diagnostics.append(f"{module_path}: missing")
+            except Exception as exc:  # pragma: no cover - depends on SDK internals
+                diagnostics.append(f"{module_path} import failed: {exc}")
+            else:
+                node_class = getattr(snake_module, node_name, None)
+                if inspect.isclass(node_class):
+                    result = _attempt(
+                        f"pipeline.create({module_path}.{node_name})",
+                        lambda: pipeline.create(node_class),
+                    )
+                    if result is not None:
+                        return result
+                else:
+                    diagnostics.append(f"{module_path}.{node_name}: missing")
+
+        diagnostics_message = ", ".join(sorted({*diagnostics})) or None
 
         error_hint = f"DepthAI node '{node_name}' is unavailable in this SDK"
         if errors:
