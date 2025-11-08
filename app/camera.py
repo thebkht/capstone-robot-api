@@ -195,21 +195,24 @@ class DepthAICameraSource(CameraSource):
         queue_factory = self._configure_output_queue(pipeline, encoder)
 
         device: Optional["dai.Device"] = None
+        queue: Any = None
         try:
             device = dai.Device()
             device.startPipeline(pipeline)
             self._log_device_connection(device)
             queue = queue_factory(device)
-        except Exception:
+            if queue is None:
+                raise CameraError("DepthAI output queue unavailable")
+        except Exception as exc:
             if device is not None:
-                with contextlib.suppress(Exception):
+                try:
                     device.close()
-            raise
-
-        if queue is None:
-            with contextlib.suppress(Exception):
-                device.close()
-            raise CameraError("DepthAI output queue unavailable")
+                except Exception as close_error:  # pragma: no cover - depends on SDK internals
+                    LOGGER.debug(
+                        "Error closing DepthAI device during cleanup: %s",
+                        close_error,
+                    )
+            raise CameraError(f"Failed to initialize DepthAI camera: {exc}") from exc
 
         self._device = device
         self._queue = queue
@@ -231,7 +234,13 @@ class DepthAICameraSource(CameraSource):
                 bitstream = getattr(encoder, "bitstream", None)
                 if bitstream is None or not hasattr(bitstream, "createOutputQueue"):
                     raise CameraError("DepthAI VideoEncoder output cannot create a host queue")
-                return bitstream.createOutputQueue(maxSize=1, blocking=False)
+                LOGGER.debug("Creating DepthAI direct output queue from encoder bitstream")
+                try:
+                    queue = bitstream.createOutputQueue(maxSize=1, blocking=False)
+                except Exception as exc:  # pragma: no cover - depends on SDK internals
+                    raise CameraError(f"Failed to create direct output queue: {exc}") from exc
+                LOGGER.info("Successfully created DepthAI direct output queue")
+                return queue
 
             return create_direct_queue
 
