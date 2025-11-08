@@ -7,7 +7,7 @@ import inspect
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 import anyio
 
@@ -164,7 +164,7 @@ class DepthAICameraSource(CameraSource):
         self._preview_height = int(preview_height)
         self._fps = float(fps)
         self._device: Optional["dai.Device"] = None
-        self._queue: Optional["dai.DataOutputQueue"] = None
+        self._queue: Optional[Any] = None
         self._stream_name = "mjpeg"
         self._lock = asyncio.Lock()
 
@@ -192,18 +192,53 @@ class DepthAICameraSource(CameraSource):
         )
         camera.preview.link(encoder.input)
 
-        # In DepthAI 3.x, XLinkOut is created using pipeline.create() with dai.node.XLinkOut.
-        # Fall back to the legacy createXLinkOut helper when the node class is absent.
-        xout = self._create_node(pipeline, "XLinkOut")
-        xout.setStreamName(self._stream_name)
-        encoder.bitstream.link(xout.input)
+        queue_factory = self._configure_output_queue(pipeline, encoder)
 
         device = dai.Device(pipeline)
         self._log_device_connection(device)
-        queue = device.getOutputQueue(name=self._stream_name, maxSize=1, blocking=False)
+        queue = queue_factory(device)
+        if queue is None:
+            raise CameraError("DepthAI output queue unavailable")
 
         self._device = device
         self._queue = queue
+
+    def _configure_output_queue(self, pipeline: "dai.Pipeline", encoder) -> Callable[[Any], Any]:
+        """Set up host queue creation for the encoded MJPEG stream."""
+
+        assert dai is not None  # For type checkers
+
+        try:
+            xout = self._create_node(pipeline, "XLinkOut")
+        except CameraError as exc:
+            LOGGER.info(
+                "DepthAI XLinkOut node unavailable; using direct output queue (reason: %s)",
+                exc,
+            )
+
+            def create_direct_queue(_device: Any) -> Any:
+                bitstream = getattr(encoder, "bitstream", None)
+                if bitstream is None or not hasattr(bitstream, "createOutputQueue"):
+                    raise CameraError("DepthAI VideoEncoder output cannot create a host queue")
+                return bitstream.createOutputQueue(maxSize=1, blocking=False)
+
+            return create_direct_queue
+
+        xout.setStreamName(self._stream_name)
+        encoder.bitstream.link(xout.input)
+
+        def create_xlink_queue(device: Any) -> Any:
+            get_output_queue = getattr(device, "getOutputQueue", None)
+            if callable(get_output_queue):
+                return get_output_queue(name=self._stream_name, maxSize=1, blocking=False)
+
+            out_socket = getattr(xout, "out", None)
+            if out_socket is not None and hasattr(out_socket, "createOutputQueue"):
+                return out_socket.createOutputQueue(maxSize=1, blocking=False)
+
+            raise CameraError("DepthAI SDK does not expose XLinkOut queue creation APIs")
+
+        return create_xlink_queue
 
     def _create_node(self, pipeline: "dai.Pipeline", node_name: str):
         """Create a DepthAI node, supporting both legacy and modern APIs."""
