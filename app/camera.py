@@ -171,6 +171,11 @@ class DepthAICameraSource(CameraSource):
     def _start_pipeline(self) -> None:
         assert dai is not None  # For type checkers
 
+        # Reclaim any leaked device handles before bringing up a new pipeline.
+        # Some DepthAI SDK builds keep devices alive after failures which causes
+        # subsequent connections to report X_LINK_DEVICE_ALREADY_IN_USE.
+        self.force_release_devices()
+
         pipeline = dai.Pipeline()
 
         # DepthAI 3.x API uses pipeline.create() with node types. Earlier versions
@@ -212,10 +217,42 @@ class DepthAICameraSource(CameraSource):
                         "Error closing DepthAI device during cleanup: %s",
                         close_error,
                     )
+                finally:
+                    try:
+                        import gc
+
+                        del device
+                        gc.collect()
+                    except Exception as gc_error:  # pragma: no cover - defensive cleanup
+                        LOGGER.debug(
+                            "Error collecting garbage after closing DepthAI device: %s",
+                            gc_error,
+                        )
             raise CameraError(f"Failed to initialize DepthAI camera: {exc}") from exc
 
         self._device = device
         self._queue = queue
+
+    @staticmethod
+    def force_release_devices() -> None:
+        """Force release all DepthAI devices. Call before creating new instances."""
+        if dai is None:
+            return
+
+        try:
+            import gc
+
+            available = dai.Device.getAllAvailableDevices()
+            for dev_info in available:
+                try:
+                    temp = dai.Device(dev_info)
+                    temp.close()
+                    del temp
+                except Exception:
+                    continue
+            gc.collect()
+        except Exception as exc:  # pragma: no cover - depends on SDK internals
+            LOGGER.debug("Could not force release devices: %s", exc)
 
     def _configure_output_queue(self, pipeline: "dai.Pipeline", encoder) -> Callable[[Any], Any]:
         """Set up host queue creation for the encoded MJPEG stream."""
