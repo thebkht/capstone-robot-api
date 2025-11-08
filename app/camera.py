@@ -5,6 +5,7 @@ import contextlib
 import importlib
 import inspect
 import logging
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Optional
@@ -175,6 +176,11 @@ class DepthAICameraSource(CameraSource):
         # Some DepthAI SDK builds keep devices alive after failures which causes
         # subsequent connections to report X_LINK_DEVICE_ALREADY_IN_USE.
         self.force_release_devices()
+
+        # Give the OS USB stack a moment to release and re-enumerate the DepthAI
+        # device after forcible cleanup. Without this pause, some systems report
+        # the device as still busy even though handles were closed.
+        time.sleep(0.5)
 
         pipeline = dai.Pipeline()
 
