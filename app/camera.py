@@ -194,10 +194,21 @@ class DepthAICameraSource(CameraSource):
 
         queue_factory = self._configure_output_queue(pipeline, encoder)
 
-        device = dai.Device(pipeline)
-        self._log_device_connection(device)
-        queue = queue_factory(device)
+        device: Optional["dai.Device"] = None
+        try:
+            device = dai.Device()
+            device.startPipeline(pipeline)
+            self._log_device_connection(device)
+            queue = queue_factory(device)
+        except Exception:
+            if device is not None:
+                with contextlib.suppress(Exception):
+                    device.close()
+            raise
+
         if queue is None:
+            with contextlib.suppress(Exception):
+                device.close()
             raise CameraError("DepthAI output queue unavailable")
 
         self._device = device
