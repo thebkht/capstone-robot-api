@@ -170,6 +170,40 @@ def _create_camera_service() -> CameraService:
 app.state.camera_service = _create_camera_service()
 
 
+@app.get("/")
+async def root() -> dict[str, object]:
+    """Simple index listing the most commonly used endpoints."""
+
+    return {
+        "status": "ok",
+        "endpoints": [
+            "/video",
+            "/shot",
+            "/camera/stream",
+            "/camera/snapshot",
+        ],
+    }
+
+
+@app.get("/video")
+async def video_stream() -> StreamingResponse:
+    """Expose the main MJPEG stream at the top level for convenience."""
+
+    return await get_camera_stream(frames=None)
+
+
+@app.get("/shot")
+async def single_frame() -> Response:
+    """Serve a single JPEG frame without the additional camera namespace."""
+
+    try:
+        frame = await app.state.camera_service.get_frame()
+    except CameraError as exc:
+        raise HTTPException(status_code=503, detail="Snapshot unavailable") from exc
+
+    return Response(content=frame, media_type="image/jpeg")
+
+
 async def _camera_stream(service: CameraService, frames: int | None) -> AsyncIterator[bytes]:
     emitted = 0
     while frames is None or emitted < frames:
