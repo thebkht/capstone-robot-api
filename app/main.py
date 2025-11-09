@@ -21,6 +21,7 @@ from .camera import (
 )
 from .oak_stream import get_snapshot as oak_snapshot
 from .oak_stream import get_video_response as oak_video_response
+from .oak_stream import shutdown as oak_shutdown
 from .models import (
     CaptureRequest,
     CaptureResponse,
@@ -220,6 +221,7 @@ async def _camera_stream(service: CameraService, frames: int | None) -> AsyncIte
 @app.on_event("shutdown")
 async def shutdown_camera() -> None:
     await app.state.camera_service.close()
+    oak_shutdown()
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Discovery"])
