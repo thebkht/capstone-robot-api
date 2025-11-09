@@ -30,6 +30,16 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 By default, the service will be available at `http://127.0.0.1:8000` (or `http://192.168.4.1:8000` when running on the robot hotspot).
 
+#### Minimal OAK-D streaming service
+
+If you simply want to expose the OAK-D Lite as an MJPEG feed without the rest of the robot API, run the bundled miniature app:
+
+```bash
+uvicorn app.oak_stream:app --host 0.0.0.0 --port 8000
+```
+
+This spins up a FastAPI service with `/video` (continuous MJPEG stream) and `/shot` (single JPEG frame) endpoints backed directly by the DepthAI pipeline described in the quick-start guide.
+
 #### Forcing USB webcam mode
 
 If you only need MJPEG streaming from a USB camera (including the OAK-D operating in UVC mode) set the following environment variables in your shell or systemd unit before starting the service:
