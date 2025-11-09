@@ -1,8 +1,10 @@
 """DepthAI-powered streaming helpers modelled after the Luxonis RTSP example."""
 from __future__ import annotations
 
+import logging
 import threading
-from typing import Generator, Optional
+import time
+from typing import Callable, Generator, Optional
 
 try:  # pragma: no cover - optional dependency
     import depthai as dai
@@ -18,6 +20,8 @@ _FPS = 30
 _PREVIEW_WIDTH = 640
 _PREVIEW_HEIGHT = 360
 _STREAM_NAME = "video"
+
+LOGGER = logging.getLogger("uvicorn.error").getChild(__name__)
 
 _lock = threading.Lock()
 _device: Optional["dai.Device"] = None
@@ -61,22 +65,76 @@ def _create_xlink_out(pipeline: "dai.Pipeline") -> "dai.node.XLinkOut":
     return xout
 
 
-def _create_pipeline() -> "dai.Pipeline":
+def _force_release_devices() -> None:
+    """Release lingering DepthAI handles before creating a new device."""
+
+    if dai is None:
+        return
+
+    try:  # pragma: no cover - depends on DepthAI runtime
+        import gc
+
+        for dev_info in dai.Device.getAllAvailableDevices():
+            try:
+                device = dai.Device(dev_info)
+            except Exception:
+                continue
+            try:
+                device.close()
+            finally:
+                del device
+        gc.collect()
+    except Exception as exc:  # pragma: no cover - best-effort cleanup
+        LOGGER.debug("DepthAI force-release skipped: %s", exc)
+
+
+def _create_pipeline() -> tuple["dai.Pipeline", Callable[["dai.Device"], "dai.DataOutputQueue"]]:
     _require_dependencies()
 
     pipeline = dai.Pipeline()
 
     camera = _create_color_camera(pipeline)
     encoder = _create_video_encoder(pipeline)
-    xout = _create_xlink_out(pipeline)
+    queue_factory: Callable[["dai.Device"], "dai.DataOutputQueue"]
 
     camera.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
     camera.setPreviewKeepAspectRatio(False)
 
     camera.preview.link(encoder.input)
-    encoder.bitstream.link(xout.input)
 
-    return pipeline
+    try:
+        xout = _create_xlink_out(pipeline)
+    except HTTPException as exc:
+        LOGGER.info(
+            "DepthAI XLinkOut unavailable; using encoder bitstream queue (reason: %s)",
+            exc.detail,
+        )
+
+        def _direct_queue(device: "dai.Device") -> "dai.DataOutputQueue":
+            bitstream = getattr(encoder, "bitstream", None)
+            if bitstream is None or not hasattr(bitstream, "createOutputQueue"):
+                raise HTTPException(status_code=503, detail="DepthAI encoder bitstream queue unavailable")
+            try:
+                return bitstream.createOutputQueue(maxSize=_QUEUE_MAX_SIZE, blocking=False)
+            except Exception as queue_exc:  # pragma: no cover - hardware dependent
+                raise HTTPException(status_code=503, detail=f"Unable to create encoder output queue: {queue_exc}") from queue_exc
+
+        queue_factory = _direct_queue
+    else:
+        encoder.bitstream.link(xout.input)
+
+        def _xlink_queue(device: "dai.Device") -> "dai.DataOutputQueue":
+            get_output_queue = getattr(device, "getOutputQueue", None)
+            if callable(get_output_queue):
+                return get_output_queue(name=_STREAM_NAME, maxSize=_QUEUE_MAX_SIZE, blocking=False)
+            out_socket = getattr(xout, "out", None)
+            if out_socket is not None and hasattr(out_socket, "createOutputQueue"):
+                return out_socket.createOutputQueue(maxSize=_QUEUE_MAX_SIZE, blocking=False)
+            raise HTTPException(status_code=503, detail="DepthAI XLinkOut queue APIs unavailable")
+
+        queue_factory = _xlink_queue
+
+    return pipeline, queue_factory
 
 
 def _ensure_device() -> "dai.DataOutputQueue":
@@ -87,16 +145,21 @@ def _ensure_device() -> "dai.DataOutputQueue":
 
     with _lock:
         if _queue is None:
-            pipeline = _create_pipeline()
+            pipeline, queue_factory = _create_pipeline()
+            _force_release_devices()
+            time.sleep(0.5)
+            device: Optional["dai.Device"] = None
+            queue: Optional["dai.DataOutputQueue"] = None
             try:
                 device = dai.Device()
                 device.startPipeline(pipeline)
-                queue = device.getOutputQueue(
-                    name=_STREAM_NAME,
-                    maxSize=_QUEUE_MAX_SIZE,
-                    blocking=False,
-                )
+                queue = queue_factory(device)
             except Exception as exc:  # pragma: no cover - hardware dependent
+                if device is not None:
+                    try:
+                        device.close()
+                    except Exception:  # pragma: no cover - defensive cleanup
+                        LOGGER.debug("Ignored error while closing DepthAI device after failure", exc_info=True)
                 raise HTTPException(status_code=503, detail=f"Unable to start DepthAI stream: {exc}") from exc
 
             _device = device
