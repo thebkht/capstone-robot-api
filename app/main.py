@@ -19,6 +19,8 @@ from .camera import (
     OpenCVCameraSource,
     PlaceholderCameraSource,
 )
+from .oak_stream import get_snapshot as oak_snapshot
+from .oak_stream import get_video_response as oak_video_response
 from .models import (
     CaptureRequest,
     CaptureResponse,
@@ -189,18 +191,14 @@ async def root() -> dict[str, object]:
 async def video_stream() -> StreamingResponse:
     """Expose the main MJPEG stream at the top level for convenience."""
 
-    return await get_camera_stream(frames=None)
+    return oak_video_response()
 
 
 @app.get("/shot")
 async def single_frame() -> Response:
     """Serve a single JPEG frame without the additional camera namespace."""
 
-    try:
-        frame = await app.state.camera_service.get_frame()
-    except CameraError as exc:
-        raise HTTPException(status_code=503, detail="Snapshot unavailable") from exc
-
+    frame = oak_snapshot()
     return Response(content=frame, media_type="image/jpeg")
 
 
