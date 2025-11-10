@@ -1,4 +1,4 @@
-"""DepthAI MJPEG streaming helpers aligned with Luxonis' mjpeg-streaming example."""
+"""DepthAI MJPEG streaming helper inspired by the Luxonis example."""
 from __future__ import annotations
 
 import argparse
@@ -15,17 +15,22 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover - optional dependency
     dai = None  # type: ignore[assignment]
 
+try:  # pragma: no cover - optional dependency
+    import cv2
+except Exception:  # pragma: no cover - optional dependency
+    cv2 = None  # type: ignore[assignment]
+
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
 from .camera import CameraError
 
 BOUNDARY = "frame"
-_QUEUE_MAX_SIZE = 4
-_STREAM_NAME = "mjpeg"
 _DEFAULT_PREVIEW_SIZE = (640, 480)
 _DEFAULT_VIDEO_SIZE = (1920, 1080)
 _DEFAULT_FPS = 30.0
+_QUEUE_SIZE = 4
+_STREAM_NAME = "mjpeg"
 
 LOGGER = logging.getLogger("uvicorn.error").getChild(__name__)
 
@@ -38,28 +43,32 @@ class _StreamArgs:
 
 
 @dataclass
-class _StreamPipeline:
+class _PipelineState:
     pipeline: "dai.Pipeline"
     queue_factory: Callable[["dai.Device"], "dai.DataOutputQueue"]
 
 
+@dataclass
+class _RuntimeState:
+    device: "dai.Device"
+    queue: "dai.DataOutputQueue"
+
+
 _lock = threading.Lock()
-_device: Optional["dai.Device"] = None
-_queue: Optional["dai.DataOutputQueue"] = None
-_pipeline: Optional[_StreamPipeline] = None
+_pipeline_state: Optional[_PipelineState] = None
+_runtime_state: Optional[_RuntimeState] = None
 
 
 def initialize_argparser() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
-    """Mirror the Luxonis example argument parser using environment defaults."""
+    """Match the Luxonis example argument parser using environment defaults."""
 
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--device", default=os.getenv("DEPTHAI_DEVICE_ID"))
     parser.add_argument("--media-path", default=os.getenv("DEPTHAI_MEDIA_PATH"))
-    parser.add_argument(
-        "--fps-limit",
-        type=float,
-        default=os.getenv("DEPTHAI_FPS_LIMIT"),
-    )
+    parser.add_argument("--fps-limit", default=os.getenv("DEPTHAI_FPS_LIMIT"))
+
+    # We do not expose command line parsing in the API runtime. Instead we
+    # parse an empty list so that the defaults above are used verbatim.
     args = parser.parse_args([])
     return parser, args
 
@@ -72,75 +81,50 @@ _ARGS = _StreamArgs(
 )
 
 
-class MJPEGStreamer:
-    """Configure an MJPEG encoder output for the supplied input stream."""
-
-    def __init__(self, pipeline: "dai.Pipeline") -> None:
-        self._pipeline = pipeline
-
-    def build(
-        self, *, preview: "dai.Node.Output"
-    ) -> Callable[["dai.Device"], "dai.DataOutputQueue"]:
-        encoder = _create_video_encoder(self._pipeline)
-        preview.link(encoder.input)
-
-        try:
-            xout = _create_xlink_out(self._pipeline)
-        except HTTPException as exc:
-            LOGGER.info(
-                "DepthAI XLinkOut unavailable; falling back to encoder bitstream queue",
-                extra={"reason": exc.detail},
-            )
-
-            def _direct_queue(device: "dai.Device") -> "dai.DataOutputQueue":
-                bitstream = getattr(encoder, "bitstream", None)
-                if bitstream is None or not hasattr(bitstream, "createOutputQueue"):
-                    raise HTTPException(
-                        status_code=503,
-                        detail="DepthAI encoder bitstream queue unavailable",
-                    )
-                try:
-                    return bitstream.createOutputQueue(maxSize=_QUEUE_MAX_SIZE, blocking=False)
-                except Exception as queue_exc:  # pragma: no cover - hardware dependent
-                    raise HTTPException(
-                        status_code=503,
-                        detail=f"Unable to create encoder output queue: {queue_exc}",
-                    ) from queue_exc
-
-            return _direct_queue
-
-        encoder.bitstream.link(xout.input)
-
-        def _xlink_queue(device: "dai.Device") -> "dai.DataOutputQueue":
-            if hasattr(device, "getOutputQueue"):
-                return device.getOutputQueue(name=_STREAM_NAME, maxSize=_QUEUE_MAX_SIZE, blocking=False)
-            out = getattr(xout, "out", None)
-            if out is not None and hasattr(out, "createOutputQueue"):
-                return out.createOutputQueue(maxSize=_QUEUE_MAX_SIZE, blocking=False)
-            raise HTTPException(status_code=503, detail="DepthAI XLinkOut queue APIs unavailable")
-
-        return _xlink_queue
-
-
 def _require_depthai() -> None:
     if dai is None:  # pragma: no cover - environment dependent
         raise HTTPException(status_code=503, detail="DepthAI streaming dependencies are unavailable")
 
 
-def _create_pipeline() -> _StreamPipeline:
-    _require_depthai()
+def _create_camera_node(pipeline: "dai.Pipeline") -> "dai.Node.Output":
+    """Create a color camera preview output compatible with DepthAI 2.x/3.x."""
 
-    pipeline = dai.Pipeline()
+    camera_node: Optional[object] = None
 
-    if _ARGS.media_path is not None:
-        preview = _create_replay_node(pipeline, _ARGS.media_path)
-    else:
-        preview = _create_color_camera(pipeline)
+    if hasattr(dai, "node") and hasattr(dai.node, "ColorCamera"):
+        camera_node = pipeline.create(dai.node.ColorCamera)
+    elif hasattr(dai, "node") and hasattr(dai.node, "Camera"):
+        # DepthAI 3.x exposes a builder style API for the generic camera node.
+        builder = pipeline.create(dai.node.Camera)
+        if hasattr(builder, "build"):
+            camera_node = builder.build()
+    elif hasattr(pipeline, "createColorCamera"):
+        camera_node = pipeline.createColorCamera()
 
-    streamer = MJPEGStreamer(pipeline)
-    queue_factory = streamer.build(preview=preview)
+    if camera_node is None:  # pragma: no cover - SDK specific behaviour
+        raise HTTPException(status_code=503, detail="DepthAI SDK lacks ColorCamera support")
 
-    return _StreamPipeline(pipeline=pipeline, queue_factory=queue_factory)
+    if hasattr(camera_node, "setBoardSocket"):
+        camera_node.setBoardSocket(getattr(dai.CameraBoardSocket, "RGB", None))
+    preview_width, preview_height = _DEFAULT_PREVIEW_SIZE
+    if hasattr(camera_node, "setPreviewSize"):
+        camera_node.setPreviewSize(preview_width, preview_height)
+    if hasattr(camera_node, "setVideoSize"):
+        video_width, video_height = _DEFAULT_VIDEO_SIZE
+        camera_node.setVideoSize(video_width, video_height)
+    if hasattr(camera_node, "setResolution"):
+        camera_node.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+    if hasattr(camera_node, "setColorOrder"):
+        camera_node.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+    if hasattr(camera_node, "setInterleaved"):
+        camera_node.setInterleaved(False)
+    if hasattr(camera_node, "setFps"):
+        camera_node.setFps(_ARGS.fps_limit or _DEFAULT_FPS)
+
+    output = getattr(camera_node, "preview", None)
+    if output is None:
+        raise HTTPException(status_code=503, detail="DepthAI ColorCamera preview output unavailable")
+    return output
 
 
 def _create_replay_node(pipeline: "dai.Pipeline", media_path: Path) -> "dai.Node.Output":
@@ -148,6 +132,7 @@ def _create_replay_node(pipeline: "dai.Pipeline", media_path: Path) -> "dai.Node
         raise HTTPException(status_code=503, detail=f"Replay file not found: {media_path}")
 
     replay_node: Optional[object] = None
+
     if hasattr(dai, "node") and hasattr(dai.node, "ReplayVideo"):
         replay_node = pipeline.create(dai.node.ReplayVideo)
     elif hasattr(dai, "node") and hasattr(dai.node, "Replay"):
@@ -169,8 +154,8 @@ def _create_replay_node(pipeline: "dai.Pipeline", media_path: Path) -> "dai.Node
     elif _ARGS.fps_limit and hasattr(replay_node, "setFpsLimit"):
         replay_node.setFpsLimit(_ARGS.fps_limit)
     if hasattr(replay_node, "setSize"):
-        width, height = _DEFAULT_VIDEO_SIZE
-        replay_node.setSize(width, height)
+        video_width, video_height = _DEFAULT_VIDEO_SIZE
+        replay_node.setSize(video_width, video_height)
 
     output = getattr(replay_node, "out", None)
     if output is None:
@@ -178,60 +163,73 @@ def _create_replay_node(pipeline: "dai.Pipeline", media_path: Path) -> "dai.Node
     return output
 
 
-def _create_color_camera(pipeline: "dai.Pipeline") -> "dai.Node.Output":
-    if hasattr(dai, "node") and hasattr(dai.node, "ColorCamera"):
-        camera = pipeline.create(dai.node.ColorCamera)
-    elif hasattr(pipeline, "createColorCamera"):
-        camera = pipeline.createColorCamera()
-    else:  # pragma: no cover - SDK specific behaviour
-        raise HTTPException(status_code=503, detail="DepthAI SDK lacks ColorCamera support")
-
-    camera.setBoardSocket(dai.CameraBoardSocket.RGB)
-    preview_width, preview_height = _DEFAULT_PREVIEW_SIZE
-    camera.setPreviewSize(preview_width, preview_height)
-    if hasattr(camera, "setVideoSize"):
-        video_width, video_height = _DEFAULT_VIDEO_SIZE
-        camera.setVideoSize(video_width, video_height)
-    camera.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-    camera.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
-    camera.setInterleaved(False)
-    camera.setFps(_DEFAULT_FPS)
-
-    output = getattr(camera, "preview", None)
-    if output is None:
-        raise HTTPException(status_code=503, detail="DepthAI ColorCamera preview output unavailable")
-    return output
-
-
 def _create_video_encoder(pipeline: "dai.Pipeline") -> "dai.node.VideoEncoder":
+    encoder_node: Optional[object] = None
+
     if hasattr(dai, "node") and hasattr(dai.node, "VideoEncoder"):
-        encoder = pipeline.create(dai.node.VideoEncoder)
+        encoder_node = pipeline.create(dai.node.VideoEncoder)
     elif hasattr(pipeline, "createVideoEncoder"):
-        encoder = pipeline.createVideoEncoder()
-    else:  # pragma: no cover - SDK specific behaviour
+        encoder_node = pipeline.createVideoEncoder()
+
+    if encoder_node is None:  # pragma: no cover - SDK specific behaviour
         raise HTTPException(status_code=503, detail="DepthAI SDK lacks VideoEncoder support")
 
-    encoder.setDefaultProfilePreset(_DEFAULT_FPS, dai.VideoEncoderProperties.Profile.MJPEG)
-    if hasattr(encoder, "setKeyframeFrequency"):
-        encoder.setKeyframeFrequency(int(_DEFAULT_FPS))
-    if hasattr(encoder, "setBitrate"):
-        encoder.setBitrate(8_000_000)
+    encoder_node.setDefaultProfilePreset(_ARGS.fps_limit or _DEFAULT_FPS, dai.VideoEncoderProperties.Profile.MJPEG)
+    if hasattr(encoder_node, "setKeyframeFrequency"):
+        encoder_node.setKeyframeFrequency(int(_ARGS.fps_limit or _DEFAULT_FPS))
+    if hasattr(encoder_node, "setBitrate"):
+        encoder_node.setBitrate(8_000_000)
     rate_control = getattr(dai.VideoEncoderProperties.RateControlMode, "CBR", None)
     if rate_control is not None:
-        encoder.setRateControlMode(rate_control)
-    return encoder
+        encoder_node.setRateControlMode(rate_control)
+    return encoder_node
 
 
-def _create_xlink_out(pipeline: "dai.Pipeline") -> "dai.node.XLinkOut":
-    if hasattr(dai, "node") and hasattr(dai.node, "XLinkOut"):
-        xout = pipeline.create(dai.node.XLinkOut)
-    elif hasattr(pipeline, "createXLinkOut"):
-        xout = pipeline.createXLinkOut()
-    else:  # pragma: no cover - SDK missing XLinkOut
-        raise HTTPException(status_code=503, detail="DepthAI SDK does not expose XLinkOut nodes")
+def _create_pipeline() -> _PipelineState:
+    _require_depthai()
 
-    xout.setStreamName(_STREAM_NAME)
-    return xout
+    pipeline = dai.Pipeline()
+
+    if _ARGS.media_path is not None:
+        preview_output = _create_replay_node(pipeline, _ARGS.media_path)
+    else:
+        preview_output = _create_camera_node(pipeline)
+
+    encoder = _create_video_encoder(pipeline)
+    preview_output.link(encoder.input)
+
+    bitstream = getattr(encoder, "bitstream", None)
+    xout = None
+
+    if bitstream is None or not hasattr(bitstream, "createOutputQueue"):
+        if hasattr(dai, "node") and hasattr(dai.node, "XLinkOut"):
+            xout = pipeline.create(dai.node.XLinkOut)
+        elif hasattr(pipeline, "createXLinkOut"):
+            xout = pipeline.createXLinkOut()
+
+        if xout is None:
+            raise HTTPException(status_code=503, detail="DepthAI encoder outputs are unavailable")
+
+        if hasattr(xout, "setStreamName"):
+            xout.setStreamName(_STREAM_NAME)
+        encoder.bitstream.link(xout.input)
+
+    def _queue_factory(device: "dai.Device") -> "dai.DataOutputQueue":
+        if bitstream is not None and hasattr(bitstream, "createOutputQueue"):
+            return bitstream.createOutputQueue(maxSize=_QUEUE_SIZE, blocking=False)
+
+        assert xout is not None
+
+        if hasattr(device, "getOutputQueue"):
+            return device.getOutputQueue(_STREAM_NAME, maxSize=_QUEUE_SIZE, blocking=False)
+
+        out = getattr(xout, "out", None)
+        if out is not None and hasattr(out, "createOutputQueue"):
+            return out.createOutputQueue(maxSize=_QUEUE_SIZE, blocking=False)
+
+        raise HTTPException(status_code=503, detail="DepthAI stream output queue unavailable")
+
+    return _PipelineState(pipeline=pipeline, queue_factory=_queue_factory)
 
 
 def _force_release_devices() -> None:
@@ -255,52 +253,67 @@ def _force_release_devices() -> None:
         LOGGER.debug("DepthAI force-release skipped", exc_info=exc)
 
 
-def _ensure_queue() -> "dai.DataOutputQueue":
-    global _pipeline, _device, _queue
+def _ensure_runtime() -> _RuntimeState:
+    global _pipeline_state, _runtime_state
 
-    if _queue is not None:
-        return _queue
+    if _runtime_state is not None:
+        return _runtime_state
 
     with _lock:
-        if _queue is None:
-            _pipeline = _create_pipeline()
-            _force_release_devices()
-            time.sleep(0.5)
+        if _runtime_state is not None:
+            return _runtime_state
 
-            device: Optional["dai.Device"] = None
-            queue: Optional["dai.DataOutputQueue"] = None
-            try:
-                if _ARGS.device:
-                    info = dai.DeviceInfo(_ARGS.device)
-                    device = dai.Device(info)
-                else:
-                    device = dai.Device()
-                device.startPipeline(_pipeline.pipeline)
-                queue = _pipeline.queue_factory(device)
-            except Exception as exc:  # pragma: no cover - hardware dependent
-                if device is not None:
-                    try:
-                        device.close()
-                    except Exception:  # pragma: no cover - defensive cleanup
-                        LOGGER.debug("Error closing DepthAI device after failure", exc_info=True)
-                raise HTTPException(status_code=503, detail=f"Unable to start DepthAI stream: {exc}") from exc
+        _pipeline_state = _create_pipeline()
 
-            _device = device
-            _queue = queue
+        _force_release_devices()
+        time.sleep(0.5)
 
-    assert _queue is not None
-    return _queue
+        device: Optional["dai.Device"] = None
+        queue: Optional["dai.DataOutputQueue"] = None
+
+        try:
+            if _ARGS.device:
+                info = dai.DeviceInfo(_ARGS.device)
+                device = dai.Device(info)
+            else:
+                device = dai.Device()
+
+            device.startPipeline(_pipeline_state.pipeline)
+            queue = _pipeline_state.queue_factory(device)
+        except Exception as exc:  # pragma: no cover - hardware dependent
+            if device is not None:
+                try:
+                    device.close()
+                except Exception:
+                    LOGGER.debug("Error closing DepthAI device after failure", exc_info=True)
+            raise HTTPException(status_code=503, detail=f"Unable to start DepthAI stream: {exc}") from exc
+
+        _runtime_state = _RuntimeState(device=device, queue=queue)
+        return _runtime_state
 
 
-def _packet_to_bytes(packet: "dai.ImgFrame") -> bytes | None:
+def _packet_to_jpeg(packet: "dai.ImgFrame") -> bytes | None:
     data = packet.getData()
-    if not data:
+    if data:
+        return bytes(data)
+
+    if not hasattr(packet, "getCvFrame"):
         return None
-    return bytes(data)
+
+    if cv2 is None:  # pragma: no cover - optional dependency
+        LOGGER.debug("Discarding frame; OpenCV not available to encode raw data")
+        return None
+
+    frame = packet.getCvFrame()
+    ok, encoded = cv2.imencode(".jpg", frame)
+    if not ok:
+        return None
+    return encoded.tobytes()
 
 
 def _mjpeg_chunks() -> Generator[bytes, None, None]:
-    queue = _ensure_queue()
+    state = _ensure_runtime()
+    queue = state.queue
 
     while True:
         try:
@@ -308,7 +321,7 @@ def _mjpeg_chunks() -> Generator[bytes, None, None]:
         except Exception:  # pragma: no cover - hardware dependent
             continue
 
-        payload = _packet_to_bytes(packet)
+        payload = _packet_to_jpeg(packet)
         if not payload:
             continue
 
@@ -332,38 +345,40 @@ def get_video_response() -> StreamingResponse:
 
 
 def get_snapshot() -> bytes:
-    queue = _ensure_queue()
+    state = _ensure_runtime()
+    queue = state.queue
 
     try:
         packet = queue.get()
     except Exception as exc:  # pragma: no cover - hardware dependent
         raise CameraError(f"Unable to read DepthAI snapshot: {exc}") from exc
 
-    payload = _packet_to_bytes(packet)
+    payload = _packet_to_jpeg(packet)
     if not payload:
         raise CameraError("Empty DepthAI snapshot payload")
     return payload
 
 
 def shutdown() -> None:
-    global _device, _queue, _pipeline
+    global _runtime_state, _pipeline_state
 
     with _lock:
-        queue = _queue
-        device = _device
-        _queue = None
-        _device = None
-        _pipeline = None
+        state = _runtime_state
+        _runtime_state = None
+        _pipeline_state = None
 
-    if queue is not None:
-        try:
-            queue.close()  # type: ignore[attr-defined]
-        except Exception:  # pragma: no cover - queue cleanup best effort
-            pass
+    if state is None:
+        return
 
-    if device is not None:
-        try:
-            device.close()
-        except Exception:  # pragma: no cover - best effort cleanup
-            LOGGER.debug("Error closing DepthAI device during shutdown", exc_info=True)
+    queue = state.queue
+    device = state.device
 
+    try:
+        queue.close()  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover - best effort cleanup
+        pass
+
+    try:
+        device.close()
+    except Exception:  # pragma: no cover - best effort cleanup
+        LOGGER.debug("Error closing DepthAI device during shutdown", exc_info=True)
