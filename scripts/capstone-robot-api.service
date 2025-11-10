@@ -7,8 +7,13 @@ Wants=network-online.target
 Type=simple
 User=jetson
 WorkingDirectory=/home/jetson/capstone-robot-api
+# Wait for USB devices to settle after boot
+ExecStartPre=/bin/sleep 10
 ExecStart=/home/jetson/capstone-robot-api/scripts/autorun.sh
 Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
 Environment=HOST=0.0.0.0
 Environment=PORT=8000
 

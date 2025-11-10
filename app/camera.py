@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
+import inspect
 import logging
+import time
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import AsyncIterator, Iterable, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 import anyio
 
@@ -161,26 +165,45 @@ class DepthAICameraSource(CameraSource):
         self._preview_height = int(preview_height)
         self._fps = float(fps)
         self._device: Optional["dai.Device"] = None
-        self._queue: Optional["dai.DataOutputQueue"] = None
-        self._stream_name = "mjpeg"
+        self._queue: Optional[Any] = None
+        # Match the default stream name used by the simple OAK-D setup snippet so
+        # diagnostics remain familiar to operators capturing the "rgb" queue.
+        self._stream_name = "rgb"
         self._lock = asyncio.Lock()
 
     def _start_pipeline(self) -> None:
         assert dai is not None  # For type checkers
 
+        # Reclaim any leaked device handles before bringing up a new pipeline.
+        # Some DepthAI SDK builds keep devices alive after failures which causes
+        # subsequent connections to report X_LINK_DEVICE_ALREADY_IN_USE.
+        self.force_release_devices()
+
+        # Give the OS USB stack a moment to release and re-enumerate the DepthAI
+        # device after forcible cleanup. Without this pause, some systems report
+        # the device as still busy even though handles were closed.
+        time.sleep(0.5)
+
         pipeline = dai.Pipeline()
 
         # DepthAI 3.x API uses pipeline.create() with node types. Earlier versions
-        # expose helpers such as createColorCamera instead. Support both styles so
-        # the service works across DepthAI releases.
-        camera = self._create_node(pipeline, "ColorCamera")
+        # expose helpers such as createColorCamera instead. Prefer the modern
+        # node-style construction path that mirrors Luxonis' reference examples
+        # and fall back to the compatibility helper when unavailable.
+        if hasattr(dai, "node") and hasattr(dai.node, "ColorCamera"):
+            camera = pipeline.create(dai.node.ColorCamera)
+        else:
+            camera = self._create_node(pipeline, "ColorCamera")
         camera.setPreviewSize(self._preview_width, self._preview_height)
         camera.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
         camera.setInterleaved(False)
         camera.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
         camera.setFps(self._fps)
 
-        encoder = self._create_node(pipeline, "VideoEncoder")
+        if hasattr(dai, "node") and hasattr(dai.node, "VideoEncoder"):
+            encoder = pipeline.create(dai.node.VideoEncoder)
+        else:
+            encoder = self._create_node(pipeline, "VideoEncoder")
         # DepthAI 3.x API: setDefaultProfilePreset only takes fps and profile
         # Width and height are automatically determined from the input stream
         encoder.setDefaultProfilePreset(
@@ -189,33 +212,256 @@ class DepthAICameraSource(CameraSource):
         )
         camera.preview.link(encoder.input)
 
-        # In DepthAI 3.x, XLinkOut is created using pipeline.create() with dai.node.XLinkOut.
-        # Fall back to the legacy createXLinkOut helper when the node class is absent.
-        xout = self._create_node(pipeline, "XLinkOut")
-        xout.setStreamName(self._stream_name)
-        encoder.bitstream.link(xout.input)
+        queue_factory = self._configure_output_queue(pipeline, encoder)
 
-        device = dai.Device(pipeline)
-        self._log_device_connection(device)
-        queue = device.getOutputQueue(name=self._stream_name, maxSize=1, blocking=False)
+        device: Optional["dai.Device"] = None
+        queue: Any = None
+        try:
+            device = dai.Device()
+            device.startPipeline(pipeline)
+            self._log_device_connection(device)
+            queue = queue_factory(device)
+            if queue is None:
+                raise CameraError("DepthAI output queue unavailable")
+        except Exception as exc:
+            if device is not None:
+                try:
+                    device.close()
+                except Exception as close_error:  # pragma: no cover - depends on SDK internals
+                    LOGGER.debug(
+                        "Error closing DepthAI device during cleanup: %s",
+                        close_error,
+                    )
+                finally:
+                    try:
+                        import gc
+
+                        del device
+                        gc.collect()
+                    except Exception as gc_error:  # pragma: no cover - defensive cleanup
+                        LOGGER.debug(
+                            "Error collecting garbage after closing DepthAI device: %s",
+                            gc_error,
+                        )
+            raise CameraError(f"Failed to initialize DepthAI camera: {exc}") from exc
 
         self._device = device
         self._queue = queue
+
+    @staticmethod
+    def force_release_devices() -> None:
+        """Force release all DepthAI devices. Call before creating new instances."""
+        if dai is None:
+            return
+
+        try:
+            import gc
+
+            available = dai.Device.getAllAvailableDevices()
+            for dev_info in available:
+                try:
+                    temp = dai.Device(dev_info)
+                    temp.close()
+                    del temp
+                except Exception:
+                    continue
+            gc.collect()
+        except Exception as exc:  # pragma: no cover - depends on SDK internals
+            LOGGER.debug("Could not force release devices: %s", exc)
+
+    def _configure_output_queue(self, pipeline: "dai.Pipeline", encoder) -> Callable[[Any], Any]:
+        """Set up host queue creation for the encoded MJPEG stream."""
+
+        assert dai is not None  # For type checkers
+
+        try:
+            if hasattr(dai, "node") and hasattr(dai.node, "XLinkOut"):
+                xout = pipeline.create(dai.node.XLinkOut)
+            else:
+                xout = self._create_node(pipeline, "XLinkOut")
+        except CameraError as exc:
+            LOGGER.info(
+                "DepthAI XLinkOut node unavailable; using direct output queue (reason: %s)",
+                exc,
+            )
+
+            def create_direct_queue(_device: Any) -> Any:
+                bitstream = getattr(encoder, "bitstream", None)
+                if bitstream is None or not hasattr(bitstream, "createOutputQueue"):
+                    raise CameraError("DepthAI VideoEncoder output cannot create a host queue")
+                LOGGER.debug("Creating DepthAI direct output queue from encoder bitstream")
+                try:
+                    queue = bitstream.createOutputQueue(maxSize=1, blocking=False)
+                except Exception as exc:  # pragma: no cover - depends on SDK internals
+                    raise CameraError(f"Failed to create direct output queue: {exc}") from exc
+                LOGGER.info("Successfully created DepthAI direct output queue")
+                return queue
+
+            return create_direct_queue
+
+        xout.setStreamName(self._stream_name)
+        encoder.bitstream.link(xout.input)
+
+        def create_xlink_queue(device: Any) -> Any:
+            get_output_queue = getattr(device, "getOutputQueue", None)
+            if callable(get_output_queue):
+                return get_output_queue(name=self._stream_name, maxSize=1, blocking=False)
+
+            out_socket = getattr(xout, "out", None)
+            if out_socket is not None and hasattr(out_socket, "createOutputQueue"):
+                return out_socket.createOutputQueue(maxSize=1, blocking=False)
+
+            raise CameraError("DepthAI SDK does not expose XLinkOut queue creation APIs")
+
+        return create_xlink_queue
 
     def _create_node(self, pipeline: "dai.Pipeline", node_name: str):
         """Create a DepthAI node, supporting both legacy and modern APIs."""
 
         assert dai is not None  # For type checkers
 
+        errors: list[str] = []
+        diagnostics: list[str] = []
+
+        def _attempt(description: str, factory):
+            try:
+                return factory()
+            except Exception as exc:  # pragma: no cover - depends on SDK internals
+                errors.append(f"{description} failed: {exc}")
+                return None
+
+        def _snake_case(name: str) -> str:
+            result: list[str] = []
+            for index, char in enumerate(name):
+                if char.isupper() and index > 0 and not name[index - 1].isupper():
+                    result.append("_")
+                result.append(char.lower())
+            return "".join(result)
+
+        def _find_node_class(module) -> Optional[type]:
+            visited: set[int] = set()
+
+            def _walk(candidate_module) -> Optional[type]:
+                module_id = id(candidate_module)
+                if module_id in visited:
+                    return None
+                visited.add(module_id)
+
+                try:
+                    direct = getattr(candidate_module, node_name)
+                except AttributeError:
+                    direct = None
+
+                if inspect.isclass(direct):
+                    return direct
+
+                exported = getattr(candidate_module, "__all__", None)
+                names = exported if isinstance(exported, Iterable) else dir(candidate_module)
+                for attr_name in names:
+                    if attr_name.startswith("_"):
+                        continue
+                    try:
+                        attr = getattr(candidate_module, attr_name)
+                    except AttributeError:
+                        continue
+                    if inspect.isclass(attr) and attr.__name__ == node_name:
+                        return attr
+                    if inspect.ismodule(attr):
+                        found = _walk(attr)
+                        if found is not None:
+                            return found
+                return None
+
+            return _walk(module)
+
         node_module = getattr(dai, "node", None)
-        if node_module is not None and hasattr(node_module, node_name):
-            return pipeline.create(getattr(node_module, node_name))
+        imported_node_module = None
+
+        if node_module is None:
+            try:
+                imported_node_module = importlib.import_module("depthai.node")
+            except ModuleNotFoundError:
+                diagnostics.append("depthai.node module: missing")
+            except Exception as exc:  # pragma: no cover - depends on SDK internals
+                diagnostics.append(f"depthai.node module import failed: {exc}")
+            else:
+                node_module = imported_node_module
+
+        if node_module is not None:
+            direct_class = getattr(node_module, node_name, None)
+            if direct_class is not None:
+                result = _attempt(f"pipeline.create(node.{node_name})", lambda: pipeline.create(direct_class))
+                if result is not None:
+                    return result
+            else:
+                diagnostics.append(f"dai.node.{node_name}: missing")
+
+            discovered_class = _find_node_class(node_module)
+            if discovered_class is not None and discovered_class is not direct_class:
+                result = _attempt(
+                    f"pipeline.create(node.*.{node_name})",
+                    lambda: pipeline.create(discovered_class),
+                )
+                if result is not None:
+                    return result
+        elif imported_node_module is None:
+            diagnostics.append("dai.node: missing")
+
+        top_level_node = getattr(dai, node_name, None)
+        if top_level_node is not None:
+            result = _attempt(f"pipeline.create({node_name})", lambda: pipeline.create(top_level_node))
+            if result is not None:
+                return result
+        else:
+            diagnostics.append(f"dai.{node_name}: missing")
 
         legacy_creator = getattr(pipeline, f"create{node_name}", None)
-        if legacy_creator is not None:
-            return legacy_creator()
+        if callable(legacy_creator):
+            result = _attempt(f"pipeline.create{node_name}()", legacy_creator)
+            if result is not None:
+                return result
+        else:
+            diagnostics.append(f"pipeline.create{node_name}(): missing")
 
-        raise CameraError(f"DepthAI node '{node_name}' is unavailable in this SDK")
+        snake_name = _snake_case(node_name)
+        if snake_name:
+            module_path = f"depthai.node.{snake_name}"
+            try:
+                snake_module = importlib.import_module(module_path)
+            except ModuleNotFoundError:
+                diagnostics.append(f"{module_path}: missing")
+            except Exception as exc:  # pragma: no cover - depends on SDK internals
+                diagnostics.append(f"{module_path} import failed: {exc}")
+            else:
+                node_class = getattr(snake_module, node_name, None)
+                if inspect.isclass(node_class):
+                    result = _attempt(
+                        f"pipeline.create({module_path}.{node_name})",
+                        lambda: pipeline.create(node_class),
+                    )
+                    if result is not None:
+                        return result
+                else:
+                    diagnostics.append(f"{module_path}.{node_name}: missing")
+
+        diagnostics_message = ", ".join(sorted({*diagnostics})) or None
+
+        error_hint = f"DepthAI node '{node_name}' is unavailable in this SDK"
+        if errors:
+            error_hint = f"{error_hint} ({'; '.join(errors)})"
+
+        depthai_version = getattr(dai, "__version__", "unknown")
+        diagnostic_parts = [f"DepthAI version: {depthai_version}"]
+        if diagnostics_message:
+            diagnostic_parts.append(diagnostics_message)
+
+        LOGGER.warning(
+            "DepthAI diagnostics for missing node %s: %s",
+            node_name,
+            "; ".join(diagnostic_parts),
+        )
+
+        raise CameraError(error_hint)
 
     def _log_device_connection(self, device: "dai.Device") -> None:
         """Emit diagnostic details about the connected DepthAI device."""

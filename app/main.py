@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
+from pathlib import Path
 from datetime import datetime
 from typing import AsyncIterator
 
@@ -17,6 +19,9 @@ from .camera import (
     OpenCVCameraSource,
     PlaceholderCameraSource,
 )
+from .oak_stream import get_snapshot as oak_snapshot
+from .oak_stream import get_video_response as oak_video_response
+from .oak_stream import shutdown as oak_shutdown
 from .models import (
     CaptureRequest,
     CaptureResponse,
@@ -56,10 +61,67 @@ app.add_middleware(
 )
 
 
+def _get_env_flag(name: str) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return False
+
+    normalized = value.strip().lower()
+    return normalized in {"1", "true", "yes", "on"}
+
+
+_FORCE_WEBCAM = _get_env_flag("CAMERA_FORCE_WEBCAM")
+_WEBCAM_DEVICE = os.getenv("CAMERA_WEBCAM_DEVICE")
+
+
+def _iter_webcam_candidates() -> list[int | str]:
+    """Return preferred webcam device identifiers.
+
+    The order favours explicit configuration, then any OAK-D UVC interfaces,
+    and finally generic `/dev/video*` indices so we still try something when no
+    metadata is available.
+    """
+
+    candidates: list[int | str] = []
+
+    if _WEBCAM_DEVICE is not None:
+        try:
+            candidates.append(int(_WEBCAM_DEVICE))
+        except ValueError:
+            candidates.append(_WEBCAM_DEVICE)
+
+    by_id_dir = Path("/dev/v4l/by-id")
+    if by_id_dir.is_dir():
+        for entry in sorted(by_id_dir.iterdir()):
+            name = entry.name.lower()
+            if "oak" not in name and "depthai" not in name and "luxonis" not in name:
+                continue
+            try:
+                resolved = entry.resolve(strict=True)
+            except OSError:
+                continue
+            candidates.append(str(resolved))
+
+    # Fall back to common numeric indices if nothing more specific was found.
+    # These entries are appended after any explicit or detected OAK-D devices
+    # so that laptops with built-in webcams still prefer the external device
+    # when one is present.
+    generic_indices = range(0, 4)
+    for index in generic_indices:
+        if index not in candidates:
+            candidates.append(index)
+
+    return candidates
+
+
 def _create_camera_service() -> CameraService:
     primary_source = None
 
-    if DepthAICameraSource.is_available():
+    if _FORCE_WEBCAM:
+        LOGGER.info(
+            "DepthAI camera explicitly disabled via CAMERA_FORCE_WEBCAM; attempting USB webcam sources instead",
+        )
+    elif DepthAICameraSource.is_available():
         try:
             primary_source = DepthAICameraSource()
             LOGGER.info("Using DepthAI camera source for streaming")
@@ -72,11 +134,26 @@ def _create_camera_service() -> CameraService:
 
     if primary_source is None:
         if OpenCVCameraSource.is_available():
-            try:
-                primary_source = OpenCVCameraSource()
-                LOGGER.info("Using OpenCV camera source for streaming")
-            except CameraError as exc:
-                LOGGER.warning("OpenCV camera source unavailable: %s", exc)
+            for candidate in _iter_webcam_candidates():
+                try:
+                    LOGGER.info(
+                        "Attempting webcam device %s for primary stream source",
+                        candidate,
+                    )
+                    primary_source = OpenCVCameraSource(device=candidate)
+                except CameraError as exc:
+                    LOGGER.warning(
+                        "OpenCV camera source unavailable on %s: %s",
+                        candidate,
+                        exc,
+                    )
+                    primary_source = None
+                    continue
+                else:
+                    LOGGER.info("Using OpenCV camera source for streaming")
+                    break
+            else:
+                LOGGER.warning("Unable to open any webcam device for streaming")
         else:
             LOGGER.warning(
                 "OpenCV package not installed; skipping USB camera stream. Install the 'opencv-python' package to enable it."
@@ -94,6 +171,36 @@ def _create_camera_service() -> CameraService:
 
 
 app.state.camera_service = _create_camera_service()
+
+
+@app.get("/")
+async def root() -> dict[str, object]:
+    """Simple index listing the most commonly used endpoints."""
+
+    return {
+        "status": "ok",
+        "endpoints": [
+            "/video",
+            "/shot",
+            "/camera/stream",
+            "/camera/snapshot",
+        ],
+    }
+
+
+@app.get("/video")
+async def video_stream() -> StreamingResponse:
+    """Expose the main MJPEG stream at the top level for convenience."""
+
+    return oak_video_response()
+
+
+@app.get("/shot")
+async def single_frame() -> Response:
+    """Serve a single JPEG frame without the additional camera namespace."""
+
+    frame = oak_snapshot()
+    return Response(content=frame, media_type="image/jpeg")
 
 
 async def _camera_stream(service: CameraService, frames: int | None) -> AsyncIterator[bytes]:
@@ -114,6 +221,7 @@ async def _camera_stream(service: CameraService, frames: int | None) -> AsyncIte
 @app.on_event("shutdown")
 async def shutdown_camera() -> None:
     await app.state.camera_service.close()
+    oak_shutdown()
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Discovery"])
@@ -139,6 +247,23 @@ async def get_camera_snapshot() -> Response:
 
 @app.get("/camera/stream", tags=["Camera"])
 async def get_camera_stream(frames: int | None = Query(default=None, ge=1)) -> StreamingResponse:
+    try:
+        response = oak_video_response()
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+        LOGGER.info(
+            "DepthAI MJPEG stream unavailable; falling back to camera service",
+            extra={"reason": exc.detail},
+        )
+    else:
+        if frames is not None:
+            LOGGER.info(
+                "Ignoring frame limit request; DepthAI MJPEG stream is continuous",
+                extra={"frames": frames},
+            )
+        return response
+
     async def stream_generator() -> AsyncIterator[bytes]:
         LOGGER.info("Starting camera stream", extra={"frames": frames})
         frame_count = 0
