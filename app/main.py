@@ -247,6 +247,23 @@ async def get_camera_snapshot() -> Response:
 
 @app.get("/camera/stream", tags=["Camera"])
 async def get_camera_stream(frames: int | None = Query(default=None, ge=1)) -> StreamingResponse:
+    try:
+        response = oak_video_response()
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+        LOGGER.info(
+            "DepthAI MJPEG stream unavailable; falling back to camera service",
+            extra={"reason": exc.detail},
+        )
+    else:
+        if frames is not None:
+            LOGGER.info(
+                "Ignoring frame limit request; DepthAI MJPEG stream is continuous",
+                extra={"frames": frames},
+            )
+        return response
+
     async def stream_generator() -> AsyncIterator[bytes]:
         LOGGER.info("Starting camera stream", extra={"frames": frames})
         frame_count = 0
