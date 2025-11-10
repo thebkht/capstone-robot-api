@@ -21,7 +21,7 @@ ensure_tailscale() {
     echo "tailscale up failed (continuing without remote access); ensure sudo permissions are configured" >&2
   fi
 
-  if ! sudo -n tailscale funnel 8000; then
+  if ! sudo tailscale funnel 8000; then
     echo "tailscale funnel setup failed (continuing without remote access); ensure sudo permissions are configured" >&2
   fi
 }
