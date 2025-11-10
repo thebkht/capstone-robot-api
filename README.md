@@ -59,6 +59,34 @@ To launch the service automatically on your Jetson at boot, install the provided
 
 You can confirm it started successfully with `systemctl status capstone-robot-api.service` and inspect logs via `journalctl -u capstone-robot-api.service`.
 
+### Checking logs
+
+The robot API is designed to run under systemd, so the easiest way to review logs is with `journalctl`:
+
+```bash
+# Show the most recent messages and keep following new ones
+sudo journalctl -u capstone-robot-api.service -f
+
+# Review logs from the current boot only
+sudo journalctl -u capstone-robot-api.service --since "today"
+```
+
+If you launched the server manually (for example while developing on a workstation), logs are written to the console. You can stream them with any log follower, such as:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000 2>&1 | tee uvicorn.log
+tail -f uvicorn.log
+```
+
+For more verbose diagnostics, adjust the log level before starting the service:
+
+```bash
+export LOG_LEVEL=debug
+sudo systemctl restart capstone-robot-api.service
+```
+
+This uses the `scripts/logging.ini` configuration that ships with the project, so any changes you make there will automatically be reflected in both the systemd unit and manual runs.
+
 ### Updating a running deployment
 
 Once the service is installed and enabled you can deploy new versions with the following workflow:
