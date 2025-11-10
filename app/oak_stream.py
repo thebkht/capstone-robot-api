@@ -311,15 +311,15 @@ def _packet_to_jpeg(packet: "dai.ImgFrame") -> bytes | None:
     return encoded.tobytes()
 
 
-def _mjpeg_chunks() -> Generator[bytes, None, None]:
-    state = _ensure_runtime()
+def _mjpeg_chunks(state: _RuntimeState) -> Generator[bytes, None, None]:
     queue = state.queue
 
     while True:
         try:
             packet = queue.get()
         except Exception:  # pragma: no cover - hardware dependent
-            continue
+            LOGGER.debug("Error receiving DepthAI packet; ending stream", exc_info=True)
+            break
 
         payload = _packet_to_jpeg(packet)
         if not payload:
@@ -335,12 +335,13 @@ def _mjpeg_chunks() -> Generator[bytes, None, None]:
 
 def get_video_response() -> StreamingResponse:
     try:
-        generator = _mjpeg_chunks()
+        state = _ensure_runtime()
     except HTTPException:
         raise
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(status_code=503, detail=f"DepthAI stream unavailable: {exc}") from exc
 
+    generator = _mjpeg_chunks(state)
     return StreamingResponse(generator, media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY}")
 
 
