@@ -25,6 +25,10 @@ from fastapi.responses import StreamingResponse
 
 from .camera import CameraError
 
+
+class DepthAIStreamError(RuntimeError):
+    """Raised when the DepthAI MJPEG runtime cannot be prepared."""
+
 BOUNDARY = "frame"
 _DEFAULT_PREVIEW_SIZE = (640, 480)
 _DEFAULT_VIDEO_SIZE = (1920, 1080)
@@ -271,22 +275,47 @@ def _ensure_runtime() -> _RuntimeState:
         device: Optional["dai.Device"] = None
         queue: Optional["dai.DataOutputQueue"] = None
 
-        try:
-            if _ARGS.device:
-                info = dai.DeviceInfo(_ARGS.device)
-                device = dai.Device(info)
-            else:
-                device = dai.Device()
+        attempts = 3
+        last_error: Optional[Exception] = None
 
-            device.startPipeline(_pipeline_state.pipeline)
-            queue = _pipeline_state.queue_factory(device)
-        except Exception as exc:  # pragma: no cover - hardware dependent
-            if device is not None:
-                try:
-                    device.close()
-                except Exception:
-                    LOGGER.debug("Error closing DepthAI device after failure", exc_info=True)
-            raise HTTPException(status_code=503, detail=f"Unable to start DepthAI stream: {exc}") from exc
+        for attempt in range(1, attempts + 1):
+            try:
+                if _ARGS.device:
+                    info = dai.DeviceInfo(_ARGS.device)
+                    device = dai.Device(info)
+                else:
+                    device = dai.Device()
+
+                device.startPipeline(_pipeline_state.pipeline)
+                queue = _pipeline_state.queue_factory(device)
+            except Exception as exc:  # pragma: no cover - hardware dependent
+                last_error = exc
+                if device is not None:
+                    try:
+                        device.close()
+                    except Exception:
+                        LOGGER.debug("Error closing DepthAI device after failure", exc_info=True)
+                device = None
+                queue = None
+                if attempt < attempts:
+                    LOGGER.info(
+                        "Retrying DepthAI runtime startup after failure",
+                        extra={"attempt": attempt, "error": str(exc)},
+                    )
+                    _force_release_devices()
+                    time.sleep(0.5)
+                    continue
+                break
+            else:
+                last_error = None
+                break
+
+        if device is None or queue is None or last_error is not None:
+            if last_error is not None:
+                detail = f"Unable to start DepthAI stream: {last_error}"
+            else:
+                detail = "DepthAI queue unavailable"
+            raise DepthAIStreamError(detail)
 
         _runtime_state = _RuntimeState(device=device, queue=queue)
         return _runtime_state
@@ -336,8 +365,8 @@ def _mjpeg_chunks(state: _RuntimeState) -> Generator[bytes, None, None]:
 def get_video_response() -> StreamingResponse:
     try:
         state = _ensure_runtime()
-    except HTTPException:
-        raise
+    except DepthAIStreamError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(status_code=503, detail=f"DepthAI stream unavailable: {exc}") from exc
 
@@ -346,7 +375,11 @@ def get_video_response() -> StreamingResponse:
 
 
 def get_snapshot() -> bytes:
-    state = _ensure_runtime()
+    try:
+        state = _ensure_runtime()
+    except DepthAIStreamError as exc:
+        raise CameraError(str(exc)) from exc
+
     queue = state.queue
 
     try:
