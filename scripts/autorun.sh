@@ -17,19 +17,31 @@ ensure_tailscale() {
 
   echo "Configuring tailscale remote access" >&2
 
-  if ! sudo -n tailscale up --ssh --advertise-exit-node --accept-dns=false; then
-    echo "tailscale up failed (continuing without remote access); ensure sudo permissions are configured" >&2
+  # 1) make sure we're up and logged in
+  # remove --advertise-exit-node if you don't need it
+  if ! sudo -n tailscale up --ssh --accept-dns=false; then
+    echo "tailscale up failed (continuing without remote access); ensure sudo is passwordless or run as root" >&2
+    return
   fi
 
-  if ! sudo tailscale funnel 8000; then
-    echo "tailscale funnel setup failed (continuing without remote access); ensure sudo permissions are configured" >&2
+  # 2) create the serve config inside the tailnet
+  if ! sudo -n tailscale serve http 8000; then
+    echo "tailscale serve setup failed (continuing without remote access)" >&2
+    return
+  fi
+
+  # 3) make it public
+  if ! sudo -n tailscale funnel 8000; then
+    echo "tailscale funnel setup failed (continuing without public access); check tailnet funnel settings" >&2
   fi
 }
 
+# activate venv if present
 if [[ -f "${VENV_PATH}/bin/activate" ]]; then
   source "${VENV_PATH}/bin/activate"
 fi
 
+# do tailscale first (before starting uvicorn)
 ensure_tailscale
 
 cd "${PROJECT_ROOT}"
@@ -42,5 +54,5 @@ elif [[ -n "${LOG_LEVEL}" ]]; then
   LOGGING_ARGS+=(--log-level "${LOG_LEVEL}")
 fi
 
+# IMPORTANT: exec should be LAST
 exec "${UVICORN_BIN}" app.main:app "${LOGGING_ARGS[@]}"
-
