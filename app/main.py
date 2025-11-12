@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import importlib
 import logging
 import os
 import secrets
@@ -11,6 +12,8 @@ import time
 from pathlib import Path
 from datetime import datetime
 from typing import Any, AsyncIterator, Optional
+
+LOGGER = logging.getLogger("uvicorn.error").getChild(__name__)
 
 # Ensure project root is in Python path for imports when running as service
 # This MUST happen before any app.* imports
@@ -24,29 +27,65 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-# Import Rover controller - try both relative and absolute imports
-# Try absolute import first since it's more reliable when running as service
+# Import Rover controller - try multiple import styles so deployment layouts work
 Rover = None
 serial = None
 _rover_import_error = None
 
-# Try absolute import first (more reliable for service)
-try:
-    from app.rover_controller import Rover
-    import serial
-    _rover_import_error = None  # Success
-except ImportError as e1:
-    _rover_import_error = f"Absolute import failed: {e1}"
-    # Try relative import as fallback
+
+def _attempt_import(module_name: str, package: str | None = None) -> tuple[bool, str | None]:
+    """Attempt to import the rover_controller module variant."""
+
+    global Rover, serial, _rover_import_error
+
     try:
-        from .rover_controller import Rover
-        import serial
-        _rover_import_error = None  # Success with relative import
-    except ImportError as e2:
-        # Both imports failed
-        _rover_import_error = f"Absolute: {e1}, Relative: {e2}"
-        Rover = None  # type: ignore
-        serial = None  # type: ignore
+        if package is None:
+            module = importlib.import_module(module_name)
+        else:
+            module = importlib.import_module(module_name, package)
+    except ImportError as exc:
+        LOGGER.debug("Failed to import %s (package=%s): %s", module_name, package, exc, exc_info=True)
+        return False, f"{module_name} ({package or '-'}) import error: {exc}"
+
+    rover_cls = getattr(module, "Rover", None)
+
+    if rover_cls is None:
+        message = f"{module_name} missing Rover class (Rover={rover_cls})"
+        LOGGER.debug(message)
+        return False, message
+
+    serial_module = getattr(module, "serial", None)
+    if serial_module is None:
+        try:
+            serial_module = importlib.import_module("serial")
+        except ImportError as exc:
+            message = (
+                f"{module_name} missing serial module and pyserial import failed: {exc}"
+            )
+            LOGGER.debug(message, exc_info=True)
+            return False, message
+
+    Rover = rover_cls
+    serial = serial_module
+    _rover_import_error = None
+    LOGGER.info("rover_controller module imported via %s", module_name)
+    return True, None
+
+
+_import_failures: list[str] = []
+_candidates: list[tuple[str, str | None]] = [("app.rover_controller", None)]
+if __package__:
+    _candidates.append((".rover_controller", __package__))
+_candidates.append(("rover_controller", None))
+
+for candidate, package in _candidates:
+    success, error_msg = _attempt_import(candidate, package)
+    if success:
+        break
+    if error_msg:
+        _import_failures.append(error_msg)
+else:
+    _rover_import_error = " ; ".join(_import_failures)
 
 from .camera import (
     CameraError,
@@ -83,8 +122,6 @@ APP_VERSION = "0.1.0"
 ROBOT_NAME = "rover-01"
 ROBOT_SERIAL = "rovy-01"
 BOUNDARY = "frame"
-
-LOGGER = logging.getLogger("uvicorn.error").getChild(__name__)
 
 # Log import status for Rover
 if Rover is None:
@@ -293,35 +330,91 @@ def _create_camera_service() -> CameraService:
 app.state.camera_service = _create_camera_service()
 
 
-def _find_serial_device() -> Optional[str]:
+def _find_serial_device() -> tuple[Optional[str], list[str]]:
     """Find available serial device for rover controller."""
     if serial is None:
-        return None
-    
-    # Try common device paths
-    candidates = ["/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyUSB0", "/dev/ttyUSB1"]
+        return None, []
+
+    # Allow explicit override via environment variable.
+    env_device = os.getenv("ROVER_SERIAL_DEVICE")
+    attempted: list[str] = []
+    if env_device:
+        if os.path.exists(env_device):
+            try:
+                test_ser = serial.Serial(env_device, 115200, timeout=0.2)
+                test_ser.close()
+            except (serial.SerialException, PermissionError, OSError) as exc:
+                LOGGER.warning(
+                    "Configured rover serial device %s unavailable: %s", env_device, exc
+                )
+            else:
+                LOGGER.info("Using rover serial device from environment: %s", env_device)
+                return env_device, [env_device]
+        else:
+            LOGGER.warning("Configured rover serial device %s does not exist", env_device)
+        attempted.append(env_device)
+
+    candidates: list[str] = []
+
+    # Probe through pyserial's port listing when available for dynamic detection.
+    try:
+        from serial.tools import list_ports  # type: ignore
+
+        for port in list_ports.comports():
+            if port.device:
+                candidates.append(port.device)
+    except Exception as exc:  # pragma: no cover - defensive; list_ports may be missing
+        LOGGER.debug("Failed to enumerate serial ports via pyserial: %s", exc, exc_info=True)
+
+    # Ensure we also try a sensible default set for Jetson-style deployments.
+    candidates.extend(
+        device
+        for device in ["/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyUSB0", "/dev/ttyUSB1"]
+        if device not in candidates
+    )
+
     for device in candidates:
+        if device not in attempted:
+            attempted.append(device)
         if os.path.exists(device):
             try:
                 # Try to open it to verify it's accessible
-                test_ser = serial.Serial(device, 115200, timeout=0.1)
+                test_ser = serial.Serial(device, 115200, timeout=0.2)
                 test_ser.close()
-                return device
-            except (serial.SerialException, PermissionError, OSError):
+                LOGGER.info("Detected rover serial device: %s", device)
+                return device, attempted
+            except (serial.SerialException, PermissionError, OSError) as exc:
+                LOGGER.debug("Serial device %s unavailable: %s", device, exc)
                 continue
-    return None
+    return None, attempted
 
 
 def _create_base_controller() -> Optional[Any]:
     """Create and initialize Rover controller for OLED display."""
     if Rover is None:
-        LOGGER.warning("rover_controller module not available; PIN display will be disabled")
+        if _rover_import_error:
+            LOGGER.error(
+                "rover_controller import failed; PIN display will be disabled: %s",
+                _rover_import_error,
+            )
+        else:
+            LOGGER.warning(
+                "rover_controller module not available; PIN display will be disabled"
+            )
         return None
 
     # Find available serial device
-    device_path = _find_serial_device()
+    device_path, attempted = _find_serial_device()
     if not device_path:
-        LOGGER.warning("No serial device found for rover controller. Tried: /dev/ttyACM0, /dev/ttyACM1, /dev/ttyUSB0, /dev/ttyUSB1")
+        if attempted:
+            LOGGER.warning(
+                "No serial device found for rover controller. Tried: %s",
+                ", ".join(attempted),
+            )
+        else:
+            LOGGER.warning(
+                "No serial devices detected for rover controller. Set ROVER_SERIAL_DEVICE to override."
+            )
         return None
 
     try:
