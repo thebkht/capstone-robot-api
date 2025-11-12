@@ -577,9 +577,56 @@ async def capture_photo(request: CaptureRequest) -> CaptureResponse:
     return CaptureResponse(saved=True, path=path, url=url)
 
 
+def _voltage_to_percentage(voltage: float | None) -> int:
+    """Convert a battery voltage reading to a percentage."""
+
+    if voltage is None:
+        return 0
+
+    # Heuristic mapping for a 3S LiPo pack commonly used on the rover.
+    empty_voltage = 11.0
+    full_voltage = 12.6
+
+    percent = (voltage - empty_voltage) / (full_voltage - empty_voltage)
+    percent = max(0.0, min(1.0, percent))
+    return int(round(percent * 100))
+
+
+def _default_status() -> StatusResponse:
+    """Return a fallback status response when rover data is unavailable."""
+
+    return StatusResponse(battery=82, cpu=37, temp=46.3, ai_state="idle")
+
+
 @app.get("/status", response_model=StatusResponse, tags=["Status"])
 async def get_status() -> StatusResponse:
-    return StatusResponse(battery=82, cpu=37, temp=46.3, ai_state="idle")
+    base_controller = _get_base_controller()
+
+    if not base_controller or not hasattr(base_controller, "get_status"):
+        LOGGER.debug("Rover base controller unavailable; returning default status")
+        return _default_status()
+
+    try:
+        rover_status = await anyio.to_thread.run_sync(base_controller.get_status)
+    except Exception as exc:  # pragma: no cover - hardware dependent
+        LOGGER.warning("Failed to obtain rover status: %s", exc, exc_info=True)
+        return _default_status()
+
+    if not isinstance(rover_status, dict):
+        LOGGER.warning(
+            "Rover status response not a dict; received %r", rover_status
+        )
+        return _default_status()
+
+    battery_percent = _voltage_to_percentage(rover_status.get("voltage"))
+    temperature = rover_status.get("temperature", 0.0) or 0.0
+
+    return StatusResponse(
+        battery=battery_percent,
+        cpu=int(rover_status.get("cpu", 0)),
+        temp=float(temperature),
+        ai_state=str(rover_status.get("ai_state", "idle")),
+    )
 
 
 @app.post("/control/move", response_model=MoveCommand, tags=["Control"])
