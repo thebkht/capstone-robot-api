@@ -14,6 +14,8 @@ def test_health_endpoint():
     payload = response.json()
     assert payload["ok"] is True
     assert payload["name"] == "rover-01"
+    assert payload["serial"] == "rovy-01"
+    assert payload["claimed"] is False  # Initially unclaimed
     assert payload["mode"] == "ap"
     assert payload["version"] == "0.1.0"
 

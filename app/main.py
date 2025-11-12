@@ -1,16 +1,52 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import logging
 import os
+import secrets
+import sys
+import time
 from pathlib import Path
 from datetime import datetime
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, Optional
+
+# Ensure project root is in Python path for imports when running as service
+# This MUST happen before any app.* imports
+_project_root = Path(__file__).parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 import anyio
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Header, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+
+# Import Rover controller - try both relative and absolute imports
+# Try absolute import first since it's more reliable when running as service
+Rover = None
+serial = None
+_rover_import_error = None
+
+# Try absolute import first (more reliable for service)
+try:
+    from app.rover_controller import Rover
+    import serial
+    _rover_import_error = None  # Success
+except ImportError as e1:
+    _rover_import_error = f"Absolute import failed: {e1}"
+    # Try relative import as fallback
+    try:
+        from .rover_controller import Rover
+        import serial
+        _rover_import_error = None  # Success with relative import
+    except ImportError as e2:
+        # Both imports failed
+        _rover_import_error = f"Absolute: {e1}, Relative: {e2}"
+        Rover = None  # type: ignore
+        serial = None  # type: ignore
 
 from .camera import (
     CameraError,
@@ -26,6 +62,10 @@ from .models import (
     CaptureRequest,
     CaptureResponse,
     CaptureType,
+    ClaimConfirmRequest,
+    ClaimConfirmResponse,
+    ClaimControlResponse,
+    ClaimRequestResponse,
     HeadCommand,
     HealthResponse,
     Mode,
@@ -41,9 +81,28 @@ from .models import (
 APP_NAME = "capstone-robot-api"
 APP_VERSION = "0.1.0"
 ROBOT_NAME = "rover-01"
+ROBOT_SERIAL = "rovy-01"
 BOUNDARY = "frame"
 
 LOGGER = logging.getLogger("uvicorn.error").getChild(__name__)
+
+# Log import status for Rover
+if Rover is None:
+    if _rover_import_error:
+        LOGGER.error("IMPORT ERROR DETAILS: rover_controller module not available: %s; OLED display will be disabled", _rover_import_error)
+    else:
+        LOGGER.warning("rover_controller module not available; OLED display will be disabled")
+else:
+    LOGGER.info("rover_controller module imported successfully")
+
+# Claim system state
+STATE = {
+    "claimed": False,
+    "control_token_hash": None,
+    "pin": None,
+    "pin_exp": 0,
+    "controller": {"sid": None, "last": 0, "ttl": 30},
+}
 
 _PLACEHOLDER_JPEG = base64.b64decode(
     """
@@ -59,6 +118,67 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def hash_token(t: str) -> str:
+    """Hash a token using SHA-256."""
+    return hashlib.sha256(t.encode()).hexdigest()
+
+
+def verify_token(token: str) -> bool:
+    """Verify a control token using constant-time comparison."""
+    if not (STATE["claimed"] and STATE["control_token_hash"]):
+        return False
+    return hmac.compare_digest(hash_token(token), STATE["control_token_hash"])
+
+
+def verify_session(session_id: str) -> bool:
+    """Verify a controller session ID and update last access time."""
+    if not STATE["controller"]["sid"]:
+        return False
+    # Use constant-time comparison for session ID
+    if not hmac.compare_digest(session_id, STATE["controller"]["sid"]):
+        return False
+    now = time.time()
+    if now - STATE["controller"]["last"] > STATE["controller"]["ttl"]:
+        # Session expired
+        STATE["controller"]["sid"] = None
+        STATE["controller"]["last"] = 0
+        return False
+    # Update last access time
+    STATE["controller"]["last"] = now
+    return True
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    """Middleware to verify x-control-token and session_id for protected endpoints."""
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+
+        # Check if endpoint requires control token
+        protected = (
+            path.startswith("/control")
+            or path.startswith("/claim/release")
+            or path.startswith("/settings")
+            or path == "/claim-control"
+        )
+
+        if protected:
+            token = request.headers.get("x-control-token")
+            if not token or not verify_token(token):
+                raise HTTPException(status_code=401, detail="unauthorized")
+
+            # Check if endpoint requires controller session (all /control/* except /claim-control)
+            if path.startswith("/control/"):
+                session_id = request.headers.get("session-id")
+                if not session_id or not verify_session(session_id):
+                    raise HTTPException(status_code=403, detail="invalid_or_expired_session")
+
+        return await call_next(request)
+
+
+app.add_middleware(AuthMiddleware)
 
 
 def _get_env_flag(name: str) -> bool:
@@ -173,6 +293,68 @@ def _create_camera_service() -> CameraService:
 app.state.camera_service = _create_camera_service()
 
 
+def _find_serial_device() -> Optional[str]:
+    """Find available serial device for rover controller."""
+    if serial is None:
+        return None
+    
+    # Try common device paths
+    candidates = ["/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyUSB0", "/dev/ttyUSB1"]
+    for device in candidates:
+        if os.path.exists(device):
+            try:
+                # Try to open it to verify it's accessible
+                test_ser = serial.Serial(device, 115200, timeout=0.1)
+                test_ser.close()
+                return device
+            except (serial.SerialException, PermissionError, OSError):
+                continue
+    return None
+
+
+def _create_base_controller() -> Optional[Any]:
+    """Create and initialize Rover controller for OLED display."""
+    if Rover is None:
+        LOGGER.warning("rover_controller module not available; PIN display will be disabled")
+        return None
+
+    # Find available serial device
+    device_path = _find_serial_device()
+    if not device_path:
+        LOGGER.warning("No serial device found for rover controller. Tried: /dev/ttyACM0, /dev/ttyACM1, /dev/ttyUSB0, /dev/ttyUSB1")
+        return None
+
+    try:
+        rover = Rover(device_path, 115200)
+        LOGGER.info("Rover controller initialized for OLED display on %s", device_path)
+        return rover
+    except FileNotFoundError as exc:
+        LOGGER.warning("Serial device %s not found: %s", device_path, exc)
+        return None
+    except PermissionError as exc:
+        LOGGER.warning("Permission denied accessing %s: %s. Try adding user to dialout group.", device_path, exc)
+        return None
+    except Exception as exc:
+        LOGGER.warning("Failed to initialize Rover controller on %s: %s", device_path, exc, exc_info=True)
+        return None
+
+
+def _get_base_controller() -> Optional[Any]:
+    """Get or initialize Rover controller (lazy initialization)."""
+    if not hasattr(app.state, 'base_controller') or app.state.base_controller is None:
+        LOGGER.info("base_controller not initialized, attempting lazy initialization...")
+        app.state.base_controller = _create_base_controller()
+        if app.state.base_controller:
+            LOGGER.info("Lazy initialization successful")
+        else:
+            LOGGER.warning("Lazy initialization failed")
+    return app.state.base_controller
+
+
+# Try to initialize at startup, but allow lazy initialization later
+app.state.base_controller = _create_base_controller()
+
+
 @app.get("/")
 async def root() -> dict[str, object]:
     """Simple index listing the most commonly used endpoints."""
@@ -226,7 +408,14 @@ async def shutdown_camera() -> None:
 
 @app.get("/health", response_model=HealthResponse, tags=["Discovery"])
 async def get_health() -> HealthResponse:
-    return HealthResponse(ok=True, name=ROBOT_NAME, mode=Mode.ACCESS_POINT, version=APP_VERSION)
+    return HealthResponse(
+        ok=True,
+        name=ROBOT_NAME,
+        serial=ROBOT_SERIAL,
+        claimed=STATE["claimed"],
+        mode=Mode.ACCESS_POINT,
+        version=APP_VERSION,
+    )
 
 
 @app.get("/network-info", response_model=NetworkInfoResponse, tags=["Discovery"])
@@ -301,12 +490,25 @@ async def get_status() -> StatusResponse:
 
 
 @app.post("/control/move", response_model=MoveCommand, tags=["Control"])
-async def move_robot(command: MoveCommand) -> MoveCommand:
+async def move_robot(
+    command: MoveCommand,
+    x_control_token: str = Header(..., alias="x-control-token"),
+    session_id: str = Header(..., alias="session-id"),
+) -> MoveCommand:
+    """Move the robot. Requires both control token and active session."""
+    # Token and session verification handled by middleware
+    # This endpoint is currently disabled (returns command without executing)
     return command
 
 
 @app.post("/control/stop", response_model=StopResponse, tags=["Control"])
-async def stop_robot() -> StopResponse:
+async def stop_robot(
+    x_control_token: str = Header(..., alias="x-control-token"),
+    session_id: str = Header(..., alias="session-id"),
+) -> StopResponse:
+    """Stop the robot. Requires both control token and active session."""
+    # Token and session verification handled by middleware
+    # This endpoint is currently disabled (returns success without executing)
     return StopResponse()
 
 
@@ -327,3 +529,82 @@ async def connect_wifi(request: WiFiConnectRequest) -> WiFiConnectResponse:
 
     message = f"Attempting to connect to {request.ssid}"
     return WiFiConnectResponse(connecting=True, message=message)
+
+
+@app.post("/claim/request", response_model=ClaimRequestResponse, tags=["Claim"])
+async def claim_request() -> ClaimRequestResponse:
+    """Generate a PIN code for claiming the robot. PIN is valid for ~120 seconds."""
+    STATE["pin"] = f"{secrets.randbelow(10**6):06d}"
+    STATE["pin_exp"] = time.time() + 120
+    
+    # Display PIN on OLED screen (try lazy initialization if not already available)
+    LOGGER.debug("Attempting to get base_controller for PIN display")
+    base_controller = _get_base_controller()
+    
+    if base_controller:
+        LOGGER.debug("base_controller found, attempting to display PIN")
+        try:
+            # Rover.display_text uses line numbers 0-3 (0=top, 3=bottom)
+            # Using lines 2 and 3 (third and fourth lines) to match original request
+            LOGGER.debug("Calling display_text(2, 'PIN Code:')")
+            base_controller.display_text(2, "PIN Code:")
+            LOGGER.debug("Calling display_text(3, '%s')", STATE["pin"])
+            base_controller.display_text(3, STATE["pin"])
+            LOGGER.info("PIN displayed on OLED: %s", STATE["pin"])
+        except AttributeError as exc:
+            LOGGER.error("base_controller missing display_text method: %s", exc, exc_info=True)
+            app.state.base_controller = None
+        except Exception as exc:
+            LOGGER.error("Failed to display PIN on OLED: %s", exc, exc_info=True)
+            # Mark as failed so we don't keep trying
+            app.state.base_controller = None
+    else:
+        LOGGER.warning("OLED display not available; PIN generated but not displayed. Rover controller is None or not initialized.")
+    
+    LOGGER.info("Generated claim PIN (expires in 120s)")
+    return ClaimRequestResponse(expiresIn=120)
+
+
+@app.post("/claim/confirm", response_model=ClaimConfirmResponse, tags=["Claim"])
+async def claim_confirm(request: ClaimConfirmRequest) -> ClaimConfirmResponse:
+    """Confirm PIN and generate control token. Returns control token and robot ID."""
+    if request.pin != STATE["pin"] or time.time() > STATE["pin_exp"] or STATE["claimed"]:
+        raise HTTPException(status_code=400, detail="invalid_or_expired_pin")
+
+    token = secrets.token_urlsafe(32)
+    STATE["control_token_hash"] = hash_token(token)
+    STATE["claimed"] = True
+    STATE["pin"] = None
+    STATE["pin_exp"] = 0
+    LOGGER.info("Robot claimed successfully")
+    return ClaimConfirmResponse(controlToken=token, robotId=ROBOT_SERIAL)
+
+
+@app.post("/claim/release", tags=["Claim"])
+async def claim_release() -> dict[str, bool]:
+    """Release the claim and rotate the control token."""
+    if not STATE["claimed"]:
+        raise HTTPException(status_code=400, detail="not_claimed")
+
+    # Rotate token
+    new_token = secrets.token_urlsafe(32)
+    STATE["control_token_hash"] = hash_token(new_token)
+    STATE["claimed"] = False
+    STATE["controller"]["sid"] = None
+    STATE["controller"]["last"] = 0
+    LOGGER.info("Robot claim released")
+    return {"released": True}
+
+
+@app.post("/claim-control", response_model=ClaimControlResponse, tags=["Claim"])
+async def claim_control() -> ClaimControlResponse:
+    """Claim a controller session. Returns session_id that must be used with control endpoints.
+    
+    Requires x-control-token header (verified by middleware).
+    """
+    # Generate new session ID
+    session_id = secrets.token_urlsafe(16)
+    STATE["controller"]["sid"] = session_id
+    STATE["controller"]["last"] = time.time()
+    LOGGER.info("Controller session claimed")
+    return ClaimControlResponse(sessionId=session_id)

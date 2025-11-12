@@ -14,6 +14,8 @@ class Mode(str, Enum):
 class HealthResponse(BaseModel):
     ok: bool = True
     name: str = Field(..., description="Robot hostname or identifier")
+    serial: str = Field(..., description="Robot serial number")
+    claimed: bool = Field(..., description="Whether the robot is currently claimed")
     mode: Mode = Field(..., description="Current connectivity mode")
     version: str = Field(..., description="Firmware/software version")
 
@@ -79,3 +81,20 @@ class WiFiConnectRequest(BaseModel):
 class WiFiConnectResponse(BaseModel):
     connecting: bool
     message: str
+
+
+class ClaimRequestResponse(BaseModel):
+    expiresIn: int = Field(..., description="PIN expiration time in seconds")
+
+
+class ClaimConfirmRequest(BaseModel):
+    pin: str = Field(..., description="PIN code from claim request")
+
+
+class ClaimConfirmResponse(BaseModel):
+    controlToken: str = Field(..., description="Control token for authenticated requests")
+    robotId: str = Field(..., description="Robot identifier")
+
+
+class ClaimControlResponse(BaseModel):
+    sessionId: str = Field(..., description="Controller session ID")
