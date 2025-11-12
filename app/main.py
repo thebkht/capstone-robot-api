@@ -221,23 +221,29 @@ class AuthMiddleware(BaseHTTPMiddleware):
 app.add_middleware(AuthMiddleware)
 
 def _get_base_controller() -> Optional[Any]:
-    base_controller: Optional[Any] = None
+    cached_controller: Optional[Any] = getattr(app.state, "base_controller", None)
 
-    if Rover is not None:
-        LOGGER.debug("Attempting to get base_controller for PIN display")
-        device, _ = _find_serial_device()
-        if device:
-            try:
-                base_controller = Rover(device)
-                LOGGER.info("Rover initialized on %s", device)
-            except Exception as exc:
-                LOGGER.warning("Failed to initialize Rover on %s: %s", device, exc, exc_info=True)
-                base_controller = None
-        else:
-            LOGGER.debug("No serial device available for Rover initialization")
-    else:
+    if cached_controller is not None:
+        return cached_controller
+
+    if Rover is None:
         LOGGER.debug("Rover class not available (import failed)")
+        return None
 
+    LOGGER.debug("Attempting to initialize base_controller for PIN display")
+    device, _ = _find_serial_device()
+    if not device:
+        LOGGER.debug("No serial device available for Rover initialization")
+        return None
+
+    try:
+        base_controller = Rover(device)
+        LOGGER.info("Rover initialized on %s", device)
+    except Exception as exc:
+        LOGGER.warning("Failed to initialize Rover on %s: %s", device, exc, exc_info=True)
+        return None
+
+    app.state.base_controller = base_controller
     return base_controller
 
 
