@@ -626,7 +626,7 @@ def _voltage_to_percentage(voltage: float | None) -> int:
         return 0
 
     # Heuristic mapping for a 3S LiPo pack commonly used on the rover.
-    empty_voltage = 11.0
+    empty_voltage = 9.0
     full_voltage = 12.6
 
     percent = (voltage - empty_voltage) / (full_voltage - empty_voltage)
@@ -642,25 +642,26 @@ def _default_status() -> StatusResponse:
 
 @app.get("/status", response_model=StatusResponse, tags=["Status"])
 async def get_status() -> StatusResponse:
+    LOGGER.info("Status endpoint called")
     base_controller = _get_base_controller()
 
-    if not base_controller or not hasattr(base_controller, "get_status"):
-        LOGGER.debug("Rover base controller unavailable; returning default status")
+    if not base_controller:
+        LOGGER.info("No base controller available; returning default status")
+        return _default_status()
+    
+    if not hasattr(base_controller, "get_status"):
+        LOGGER.warning("Base controller missing get_status method; returning default status")
         return _default_status()
 
     try:
+        LOGGER.debug("Calling base_controller.get_status()")
         rover_status = await anyio.to_thread.run_sync(base_controller.get_status)
+        LOGGER.info("Rover status received: %s", rover_status)
     except Exception as exc:  # pragma: no cover - hardware dependent
-        LOGGER.warning("Failed to obtain rover status: %s", exc, exc_info=True)
+        LOGGER.error("Failed to obtain rover status: %s", exc, exc_info=True)
         return _default_status()
 
-    if not isinstance(rover_status, dict):
-        LOGGER.warning(
-            "Rover status response not a dict; received %r", rover_status
-        )
-        return _default_status()
-
-    battery_percent = _voltage_to_percentage(rover_status.get("voltage"))
+    battery_percent = _voltage_to_percentage(rover_status["voltage"])
     temperature = rover_status.get("temperature", 0.0) or 0.0
 
     return StatusResponse(

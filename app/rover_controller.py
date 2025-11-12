@@ -163,7 +163,7 @@ class Rover:
     
     def get_status(self):
         """
-        Get the latest rover status.
+        Get the latest rover status by requesting fresh data.
         
         Returns dict with keys like:
         - voltage: Battery voltage in volts
@@ -171,11 +171,25 @@ class Rover:
         - left_speed, right_speed: Wheel speeds
         - roll, pitch, yaw: IMU orientation
         """
-        # Try to get fresh data
-        feedback = self.read_feedback()
+        # Request status update from rover
+        cmd = '{"T":130}\r\n'
+        self.ser.write(cmd.encode())
         
-        # Use last known status or fresh feedback
-        status_data = feedback if feedback and feedback.get('T') == 650 else self.last_status
+        # Wait a bit for response
+        time.sleep(0.1)
+        
+        # Try to read fresh feedback (with multiple attempts)
+        max_attempts = 5
+        for _ in range(max_attempts):
+            feedback = self.read_feedback()
+            if feedback and feedback.get('T') == 1001:
+                # Got fresh base info feedback
+                self.last_status = feedback
+                break
+            time.sleep(0.02)  # Small delay between read attempts
+        
+        # Use last known status (either fresh or cached)
+        status_data = self.last_status
         
         # Parse into friendly format
         status = {
@@ -188,7 +202,8 @@ class Rover:
             'yaw': status_data.get('y', 0.0),
         }
         return status
-
+    
+    
     def cleanup(self):
         """Release serial port safely."""
         self._stop()
