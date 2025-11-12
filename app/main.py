@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -141,6 +142,8 @@ STATE = {
     "controller": {"sid": None, "last": 0, "ttl": 30},
 }
 
+_PIN_RESET_TASK: asyncio.Task[None] | None = None
+
 _PLACEHOLDER_JPEG = base64.b64decode(
     """
 /9j/4AAQSkZJRgABAQAAAQABAAD/2wBDABALDwwMDw8NDhERExUTGBonHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8f/2wBDARESEhgVGBoZGB4dHy8fLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8v/3QAEAA3/2gAIAQEAAD8A/wD/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAsf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/AR//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/AR//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Ar//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IX//2Q==
@@ -218,6 +221,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
 app.add_middleware(AuthMiddleware)
 
 def _get_base_controller() -> Optional[Any]:
+    base_controller: Optional[Any] = None
+
     if Rover is not None:
         LOGGER.debug("Attempting to get base_controller for PIN display")
         device, _ = _find_serial_device()
@@ -232,8 +237,81 @@ def _get_base_controller() -> Optional[Any]:
             LOGGER.debug("No serial device available for Rover initialization")
     else:
         LOGGER.debug("Rover class not available (import failed)")
-    
+
     return base_controller
+
+
+def _cancel_pin_reset_task() -> None:
+    """Cancel any scheduled OLED reset task."""
+
+    global _PIN_RESET_TASK
+
+    if _PIN_RESET_TASK is not None and not _PIN_RESET_TASK.done():
+        _PIN_RESET_TASK.cancel()
+
+    _PIN_RESET_TASK = None
+
+
+def _schedule_pin_reset(pin_value: str, expiration: float) -> None:
+    """Schedule OLED reset once the current PIN expires."""
+
+    if expiration <= time.time():
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        LOGGER.debug("No running event loop available to schedule PIN reset task")
+        return
+
+    _cancel_pin_reset_task()
+
+    global _PIN_RESET_TASK
+    _PIN_RESET_TASK = loop.create_task(
+        _reset_display_after_expiration(pin_value, expiration)
+    )
+
+
+async def _reset_display_after_expiration(pin_value: str, expiration: float) -> None:
+    """Reset the OLED display once the active PIN has expired."""
+
+    global _PIN_RESET_TASK
+    current_task = asyncio.current_task()
+    delay = max(expiration - time.time(), 0)
+    cancelled_exc = anyio.get_cancelled_exc_class()
+
+    try:
+        await anyio.sleep(delay)
+    except cancelled_exc:  # pragma: no cover - cancellation is timing dependent
+        LOGGER.debug("PIN expiration reset task cancelled before completion")
+        return
+
+    if STATE["pin"] != pin_value or time.time() < expiration:
+        if _PIN_RESET_TASK is current_task:
+            _PIN_RESET_TASK = None
+        return
+
+    base_controller = _get_base_controller()
+
+    if base_controller and hasattr(base_controller, "display_reset"):
+        try:
+            base_controller.display_reset()
+            LOGGER.info("OLED display reset after PIN expiration")
+        except Exception as exc:  # pragma: no cover - hardware dependent
+            LOGGER.error(
+                "Failed to reset OLED display after PIN expiration: %s", exc, exc_info=True
+            )
+    else:
+        LOGGER.debug(
+            "Skipping OLED reset after PIN expiration; base controller unavailable or missing display_reset"
+        )
+
+    if STATE["pin"] == pin_value:
+        STATE["pin"] = None
+        STATE["pin_exp"] = 0
+
+    if _PIN_RESET_TASK is current_task:
+        _PIN_RESET_TASK = None
 
 def _get_env_flag(name: str) -> bool:
     value = os.getenv(name)
@@ -657,7 +735,9 @@ async def claim_request() -> ClaimRequestResponse:
             app.state.base_controller = None
     else:
         LOGGER.warning("OLED display not available; PIN generated but not displayed. Rover controller is None or not initialized.")
-    
+
+    _schedule_pin_reset(STATE["pin"], STATE["pin_exp"])
+
     LOGGER.info("Generated claim PIN (expires in 120s)")
     return ClaimRequestResponse(expiresIn=120)
 
@@ -673,6 +753,7 @@ async def claim_confirm(request: ClaimConfirmRequest) -> ClaimConfirmResponse:
     STATE["claimed"] = True
     STATE["pin"] = None
     STATE["pin_exp"] = 0
+    _cancel_pin_reset_task()
     LOGGER.info("Robot claimed successfully")
     return ClaimConfirmResponse(controlToken=token, robotId=ROBOT_SERIAL)
 
