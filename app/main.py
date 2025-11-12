@@ -758,9 +758,20 @@ async def claim_confirm(request: ClaimConfirmRequest) -> ClaimConfirmResponse:
     token = secrets.token_urlsafe(32)
     STATE["control_token_hash"] = hash_token(token)
     STATE["claimed"] = True
+    
+    # Reset OLED display when PIN is successfully used
+    base_controller = _get_base_controller()
+    if base_controller and hasattr(base_controller, "display_reset"):
+        try:
+            base_controller.display_reset()
+            LOGGER.info("OLED display reset after successful PIN claim")
+        except Exception as exc:
+            LOGGER.error("Failed to reset OLED display after claim: %s", exc, exc_info=True)
+    
     STATE["pin"] = None
     STATE["pin_exp"] = 0
     _cancel_pin_reset_task()
+    
     LOGGER.info("Robot claimed successfully")
     return ClaimConfirmResponse(controlToken=token, robotId=ROBOT_SERIAL)
 
