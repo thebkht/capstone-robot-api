@@ -217,6 +217,23 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(AuthMiddleware)
 
+def _get_base_controller() -> Optional[Any]:
+    if Rover is not None:
+        LOGGER.debug("Attempting to get base_controller for PIN display")
+        device, _ = _find_serial_device()
+        if device:
+            try:
+                base_controller = Rover(device)
+                LOGGER.info("Rover initialized on %s", device)
+            except Exception as exc:
+                LOGGER.warning("Failed to initialize Rover on %s: %s", device, exc, exc_info=True)
+                base_controller = None
+        else:
+            LOGGER.debug("No serial device available for Rover initialization")
+    else:
+        LOGGER.debug("Rover class not available (import failed)")
+    
+    return base_controller
 
 def _get_env_flag(name: str) -> bool:
     value = os.getenv(name)
@@ -619,21 +636,7 @@ async def claim_request() -> ClaimRequestResponse:
     STATE["pin_exp"] = time.time() + 120
     
     # Display PIN on OLED screen (try lazy initialization if not already available)
-    base_controller = None
-    if Rover is not None:
-        LOGGER.debug("Attempting to get base_controller for PIN display")
-        device, _ = _find_serial_device()
-        if device:
-            try:
-                base_controller = Rover(device)
-                LOGGER.info("Rover initialized on %s", device)
-            except Exception as exc:
-                LOGGER.warning("Failed to initialize Rover on %s: %s", device, exc, exc_info=True)
-                base_controller = None
-        else:
-            LOGGER.debug("No serial device available for Rover initialization")
-    else:
-        LOGGER.debug("Rover class not available (import failed)")
+    base_controller = _get_base_controller()
     
     if base_controller:
         LOGGER.debug("base_controller found, attempting to display PIN")
