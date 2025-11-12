@@ -48,14 +48,22 @@ def _attempt_import(module_name: str, package: str | None = None) -> tuple[bool,
         return False, f"{module_name} ({package or '-'}) import error: {exc}"
 
     rover_cls = getattr(module, "Rover", None)
-    serial_module = getattr(module, "serial", None)
 
-    if rover_cls is None or serial_module is None:
-        message = (
-            f"{module_name} missing Rover class or serial module (Rover={rover_cls}, serial={serial_module})"
-        )
+    if rover_cls is None:
+        message = f"{module_name} missing Rover class (Rover={rover_cls})"
         LOGGER.debug(message)
         return False, message
+
+    serial_module = getattr(module, "serial", None)
+    if serial_module is None:
+        try:
+            serial_module = importlib.import_module("serial")
+        except ImportError as exc:
+            message = (
+                f"{module_name} missing serial module and pyserial import failed: {exc}"
+            )
+            LOGGER.debug(message, exc_info=True)
+            return False, message
 
     Rover = rover_cls
     serial = serial_module
