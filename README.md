@@ -45,6 +45,16 @@ export CAMERA_WEBCAM_DEVICE=/dev/video2  # Optional: explicit device path or ind
 
 When `CAMERA_FORCE_WEBCAM` is enabled the API ignores the DepthAI SDK and opens the camera just like a standard webcam via OpenCV. When no device override is provided the service scans `/dev/v4l/by-id` for entries containing `oak`, `depthai`, or `luxonis` so an attached OAK-D Lite in UVC mode is automatically preferred before falling back to generic `/dev/video*` indices.
 
+#### Configuring the rover controller serial port
+
+The claim flow will display the generated PIN on the rover's OLED screen when a compatible microcontroller is connected over UART. The service automatically scans common device paths (including entries reported by `serial.tools.list_ports`), but you can explicitly point it at a known serial device using the `ROVER_SERIAL_DEVICE` environment variable:
+
+```bash
+export ROVER_SERIAL_DEVICE=/dev/ttyTHS1
+```
+
+On startup the API validates that the device exists and is accessible. The path is also retried lazily the first time the `/claim/request` endpoint is hit, so you can plug the controller in after the service is running.
+
 To launch the service automatically on your Jetson at boot, install the provided systemd unit from `scripts/capstone-robot-api.service`:
 
 1. Copy the repository to the target location (for example `/home/jetson/capstone-robot-api`).
