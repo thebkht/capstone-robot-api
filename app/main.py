@@ -389,65 +389,6 @@ def _find_serial_device() -> tuple[Optional[str], list[str]]:
     return None, attempted
 
 
-def _create_base_controller() -> Optional[Any]:
-    """Create and initialize Rover controller for OLED display."""
-    if Rover is None:
-        if _rover_import_error:
-            LOGGER.error(
-                "rover_controller import failed; PIN display will be disabled: %s",
-                _rover_import_error,
-            )
-        else:
-            LOGGER.warning(
-                "rover_controller module not available; PIN display will be disabled"
-            )
-        return None
-
-    # Find available serial device
-    device_path, attempted = _find_serial_device()
-    if not device_path:
-        if attempted:
-            LOGGER.warning(
-                "No serial device found for rover controller. Tried: %s",
-                ", ".join(attempted),
-            )
-        else:
-            LOGGER.warning(
-                "No serial devices detected for rover controller. Set ROVER_SERIAL_DEVICE to override."
-            )
-        return None
-
-    try:
-        rover = Rover(device_path, 115200)
-        LOGGER.info("Rover controller initialized for OLED display on %s", device_path)
-        return rover
-    except FileNotFoundError as exc:
-        LOGGER.warning("Serial device %s not found: %s", device_path, exc)
-        return None
-    except PermissionError as exc:
-        LOGGER.warning("Permission denied accessing %s: %s. Try adding user to dialout group.", device_path, exc)
-        return None
-    except Exception as exc:
-        LOGGER.warning("Failed to initialize Rover controller on %s: %s", device_path, exc, exc_info=True)
-        return None
-
-
-def _get_base_controller() -> Optional[Any]:
-    """Get or initialize Rover controller (lazy initialization)."""
-    if not hasattr(app.state, 'base_controller') or app.state.base_controller is None:
-        LOGGER.info("base_controller not initialized, attempting lazy initialization...")
-        app.state.base_controller = _create_base_controller()
-        if app.state.base_controller:
-            LOGGER.info("Lazy initialization successful")
-        else:
-            LOGGER.warning("Lazy initialization failed")
-    return app.state.base_controller
-
-
-# Try to initialize at startup, but allow lazy initialization later
-app.state.base_controller = _create_base_controller()
-
-
 @app.get("/")
 async def root() -> dict[str, object]:
     """Simple index listing the most commonly used endpoints."""
@@ -678,8 +619,21 @@ async def claim_request() -> ClaimRequestResponse:
     STATE["pin_exp"] = time.time() + 120
     
     # Display PIN on OLED screen (try lazy initialization if not already available)
-    LOGGER.debug("Attempting to get base_controller for PIN display")
-    base_controller = _get_base_controller()
+    base_controller = None
+    if Rover is not None:
+        LOGGER.debug("Attempting to get base_controller for PIN display")
+        device, _ = _find_serial_device()
+        if device:
+            try:
+                base_controller = Rover(device)
+                LOGGER.info("Rover initialized on %s", device)
+            except Exception as exc:
+                LOGGER.warning("Failed to initialize Rover on %s: %s", device, exc, exc_info=True)
+                base_controller = None
+        else:
+            LOGGER.debug("No serial device available for Rover initialization")
+    else:
+        LOGGER.debug("Rover class not available (import failed)")
     
     if base_controller:
         LOGGER.debug("base_controller found, attempting to display PIN")
