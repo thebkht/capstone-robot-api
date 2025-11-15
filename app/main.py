@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import asyncio
 import base64
 import hashlib
@@ -23,7 +24,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 import anyio
-from fastapi import FastAPI, HTTPException, Header, Query, Request, Response
+from fastapi import FastAPI, HTTPException, Header, Query, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -98,6 +99,8 @@ from .camera import (
 from .oak_stream import get_snapshot as oak_snapshot
 from .oak_stream import get_video_response as oak_video_response
 from .oak_stream import shutdown as oak_shutdown
+from .oak_stream import ensure_runtime as oak_ensure_runtime
+from .oak_stream import frame_to_jpeg as oak_frame_to_jpeg
 from .models import (
     CaptureRequest,
     CaptureResponse,
@@ -511,6 +514,46 @@ async def video_stream() -> StreamingResponse:
 
     return oak_video_response()
 
+
+@app.websocket("/camera/ws")
+async def camera_websocket(websocket: WebSocket):
+    """WebSocket endpoint for streaming camera frames as base64-encoded JPEG."""
+    await websocket.accept()
+    LOGGER.info("WebSocket client connected")
+    
+    try:
+        state = oak_ensure_runtime()
+        capture = state.capture
+        
+        while True:
+            ret, frame = capture.read()
+            if not ret or frame is None:
+                LOGGER.debug("Failed to read frame from camera; closing WebSocket")
+                await websocket.send_text(json.dumps({"error": "Failed to read frame"}))
+                break
+                
+            # Encode frame to JPEG
+            payload = oak_frame_to_jpeg(frame)
+            if payload:
+                # Send as JSON with base64 frame
+                b64_frame = base64.b64encode(payload).decode('utf-8')
+                await websocket.send_text(json.dumps({"frame": b64_frame}))  # Send as JSON
+            
+            # Control frame rate (e.g., 10 FPS)
+            await asyncio.sleep(0.1)
+            
+    except Exception as exc:
+        LOGGER.error("WebSocket error: %s", exc, exc_info=True)
+        try:
+            await websocket.send_text(json.dumps({"error": str(exc)}))
+            await websocket.close()
+        except Exception:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 @app.get("/shot")
 async def single_frame() -> Response:

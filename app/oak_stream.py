@@ -240,6 +240,16 @@ def get_snapshot() -> bytes:
     return payload
 
 
+def ensure_runtime():
+    """Public wrapper for _ensure_runtime() for WebSocket access."""
+    return _ensure_runtime()
+
+
+def frame_to_jpeg(frame) -> bytes | None:
+    """Public wrapper for _frame_to_jpeg() for WebSocket access."""
+    return _frame_to_jpeg(frame)
+
+
 def shutdown() -> None:
     """Shutdown and release camera resources."""
     global _runtime_state
