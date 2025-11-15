@@ -1,0 +1,12 @@
+# Serial communication with ESP32 rover controller
+pyserial==3.5
+
+# ============================================================================
+# Oak-D Depth Camera Support
+# ============================================================================
+
+# DepthAI SDK for Oak-D stereo depth camera
+depthai==2.30.0.0
+depthai-nodes==0.3.4
+depthai-pipeline-graph==0.0.5
+depthai-sdk==1.15.1
