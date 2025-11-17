@@ -89,6 +89,17 @@ class WiFiStatusResponse(BaseModel):
     ip: Optional[str] = Field(None, description="IP address of the device")
 
 
+class WiFiNetwork(BaseModel):
+    ssid: str = Field(..., description="Network SSID (name)")
+    signal_strength: Optional[int] = Field(None, description="Signal strength in percentage (0-100)")
+    security: Optional[str] = Field(None, description="Security type (e.g., WPA2, WPA, WEP, Open)")
+    frequency: Optional[float] = Field(None, description="Frequency in MHz")
+
+
+class WiFiScanResponse(BaseModel):
+    networks: list[WiFiNetwork] = Field(..., description="List of scanned WiFi networks")
+
+
 class ClaimRequestResponse(BaseModel):
     expiresIn: int = Field(..., description="PIN expiration time in seconds")
 

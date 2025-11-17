@@ -121,6 +121,8 @@ from .models import (
     StopResponse,
     WiFiConnectRequest,
     WiFiConnectResponse,
+    WiFiNetwork,
+    WiFiScanResponse,
     WiFiStatusResponse,
 )
 
@@ -877,6 +879,213 @@ async def get_wifi_status() -> WiFiStatusResponse:
         network_name=network_name,
         ip=ip_address,
     )
+
+
+def _scan_wifi_networks() -> list[WiFiNetwork]:
+    """Scan for available WiFi networks.
+    
+    Returns:
+        List of WiFiNetwork objects
+    """
+    networks: list[WiFiNetwork] = []
+    
+    # Try nmcli first (NetworkManager)
+    try:
+        # Find WiFi device first
+        device_result = subprocess.run(
+            ["nmcli", "-t", "-f", "DEVICE,TYPE", "device", "status"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        wifi_device = None
+        if device_result.returncode == 0:
+            for line in device_result.stdout.strip().split("\n"):
+                if not line:
+                    continue
+                parts = line.split(":")
+                if len(parts) >= 2 and parts[1] == "wifi":
+                    wifi_device = parts[0]
+                    break
+        
+        # Trigger a scan on the WiFi device (or all devices if device not found)
+        if wifi_device:
+            scan_result = subprocess.run(
+                ["nmcli", "device", "wifi", "rescan", wifi_device],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        else:
+            scan_result = subprocess.run(
+                ["nmcli", "device", "wifi", "rescan"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        # Don't fail if rescan fails, just use existing scan results
+        # Wait a moment for scan to complete
+        time.sleep(2)
+        
+        # Get list of ALL available networks (not just connected)
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY,FREQ", "device", "wifi"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().split("\n"):
+                if not line:
+                    continue
+                parts = line.split(":")
+                if len(parts) >= 1:
+                    ssid = parts[0].strip()
+                    # Skip empty SSIDs only
+                    if not ssid or ssid == "--":
+                        continue
+                    
+                    # Parse signal strength (0-100)
+                    signal_strength = None
+                    if len(parts) >= 2 and parts[1].strip() and parts[1].strip() != "--":
+                        try:
+                            signal_strength = int(parts[1].strip())
+                        except (ValueError, IndexError):
+                            pass
+                    
+                    # Parse security type
+                    security = None
+                    if len(parts) >= 3 and parts[2].strip() and parts[2].strip() != "--":
+                        security = parts[2].strip()
+                    
+                    # Parse frequency (MHz)
+                    frequency = None
+                    if len(parts) >= 4 and parts[3].strip() and parts[3].strip() != "--":
+                        try:
+                            # nmcli returns frequency in MHz
+                            frequency = float(parts[3].strip())
+                        except (ValueError, IndexError):
+                            pass
+                    
+                    networks.append(WiFiNetwork(
+                        ssid=ssid,
+                        signal_strength=signal_strength,
+                        security=security,
+                        frequency=frequency,
+                    ))
+    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as exc:
+        LOGGER.debug("nmcli scan not available or failed: %s", exc)
+    
+    # Also try iwlist to ensure we get all networks (iwlist is often more comprehensive)
+    # This will add any additional networks not found by nmcli
+    try:
+        # Find WiFi interface
+        wifi_interface = None
+        for interface in ["wlan0", "wlp2s0", "wlp3s0"]:
+            try:
+                check_result = subprocess.run(
+                    ["iwconfig", interface],
+                    capture_output=True,
+                    text=True,
+                    timeout=1,
+                )
+                if check_result.returncode == 0:
+                    wifi_interface = interface
+                    break
+            except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+                continue
+        
+        if wifi_interface:
+            # Scan for networks
+            scan_result = subprocess.run(
+                ["iwlist", wifi_interface, "scan"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if scan_result.returncode == 0:
+                current_ssid = None
+                current_signal = None
+                current_security = None
+                current_freq = None
+                
+                for line in scan_result.stdout.split("\n"):
+                    line = line.strip()
+                    if "ESSID:" in line:
+                        # Save previous network if exists
+                        if current_ssid:
+                            networks.append(WiFiNetwork(
+                                ssid=current_ssid,
+                                signal_strength=current_signal,
+                                security=current_security,
+                                frequency=current_freq,
+                            ))
+                        # Parse new SSID
+                        try:
+                            essid_part = line.split("ESSID:")[1].strip().strip('"')
+                            if essid_part:
+                                current_ssid = essid_part
+                                current_signal = None
+                                current_security = None
+                                current_freq = None
+                        except (IndexError, ValueError):
+                            pass
+                    elif "Signal level=" in line:
+                        try:
+                            # Parse signal level (usually in dBm, convert to percentage approximation)
+                            signal_part = line.split("Signal level=")[1].split()[0]
+                            # iwlist typically gives negative dBm values, convert roughly
+                            if signal_part.replace("-", "").replace(".", "").isdigit():
+                                dbm = float(signal_part)
+                                # Rough conversion: -100dBm = 0%, -50dBm = 100%
+                                signal_strength = max(0, min(100, int(2 * (dbm + 100))))
+                                current_signal = signal_strength
+                        except (ValueError, IndexError):
+                            pass
+                    elif "Encryption key:" in line:
+                        if "on" in line.lower():
+                            current_security = "WEP"  # Default, may be updated
+                        else:
+                            current_security = "Open"
+                    elif "IEEE 802.11" in line or "WPA" in line or "WPA2" in line:
+                        if "WPA2" in line:
+                            current_security = "WPA2"
+                        elif "WPA" in line:
+                            current_security = "WPA"
+                    elif "Frequency:" in line:
+                        try:
+                            freq_part = line.split("Frequency:")[1].split()[0]
+                            # Convert GHz to MHz if needed
+                            if "GHz" in line:
+                                frequency = float(freq_part) * 1000
+                            else:
+                                frequency = float(freq_part)
+                            current_freq = frequency
+                        except (ValueError, IndexError):
+                            pass
+                
+                # Add last network
+                if current_ssid:
+                    networks.append(WiFiNetwork(
+                        ssid=current_ssid,
+                        signal_strength=current_signal,
+                        security=current_security,
+                        frequency=current_freq,
+                    ))
+    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as exc:
+        LOGGER.debug("iwlist scan not available or failed: %s", exc)
+    
+    # Sort by signal strength (strongest first)
+    networks.sort(key=lambda n: n.signal_strength if n.signal_strength is not None else -1, reverse=True)
+    
+    return networks
+
+
+@app.get("/wifi/scan", response_model=WiFiScanResponse, tags=["Connectivity"])
+async def scan_wifi_networks() -> WiFiScanResponse:
+    """Scan for available WiFi networks and return a list of discovered networks."""
+    networks = await anyio.to_thread.run_sync(_scan_wifi_networks)
+    return WiFiScanResponse(networks=networks)
 
 
 @app.post("/wifi/connect", response_model=WiFiConnectResponse, tags=["Connectivity"])
