@@ -83,6 +83,12 @@ class WiFiConnectResponse(BaseModel):
     message: str
 
 
+class WiFiStatusResponse(BaseModel):
+    connected: bool = Field(..., description="Whether WiFi is connected")
+    network_name: Optional[str] = Field(None, description="Name of the connected WiFi network (SSID)")
+    ip: Optional[str] = Field(None, description="IP address of the device")
+
+
 class ClaimRequestResponse(BaseModel):
     expiresIn: int = Field(..., description="PIN expiration time in seconds")
 

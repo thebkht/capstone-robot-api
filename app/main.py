@@ -9,6 +9,8 @@ import importlib
 import logging
 import os
 import secrets
+import subprocess
+import socket
 import sys
 import time
 from pathlib import Path
@@ -119,6 +121,7 @@ from .models import (
     StopResponse,
     WiFiConnectRequest,
     WiFiConnectResponse,
+    WiFiStatusResponse,
 )
 
 APP_NAME = "capstone-robot-api"
@@ -746,6 +749,134 @@ async def move_head(command: HeadCommand) -> HeadCommand:
 @app.get("/mode", response_model=ModeResponse, tags=["Connectivity"])
 async def get_mode() -> ModeResponse:
     return ModeResponse(mode=Mode.ACCESS_POINT)
+
+
+def _get_wifi_status() -> tuple[bool, Optional[str], Optional[str]]:
+    """Get WiFi connection status, network name, and IP address.
+    
+    Returns:
+        Tuple of (connected: bool, network_name: Optional[str], ip: Optional[str])
+    """
+    connected = False
+    network_name = None
+    ip_address = None
+    
+    # Try nmcli first (NetworkManager)
+    try:
+        # Check for active WiFi connection
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().split("\n"):
+                if not line:
+                    continue
+                parts = line.split(":")
+                if len(parts) >= 4:
+                    device = parts[0]
+                    device_type = parts[1]
+                    state = parts[2]
+                    connection = parts[3]
+                    # Check if it's a WiFi device and connected
+                    if device_type == "wifi" and state == "connected" and connection:
+                        network_name = connection
+                        connected = True
+                        # Get IP address for this device
+                        ip_result = subprocess.run(
+                            ["nmcli", "-t", "-f", "IP4.ADDRESS", "device", "show", device],
+                            capture_output=True,
+                            text=True,
+                            timeout=1,
+                        )
+                        if ip_result.returncode == 0 and ip_result.stdout.strip():
+                            # Parse format like "IP4.ADDRESS[1]:192.168.200.123/24"
+                            output = ip_result.stdout.strip()
+                            # Split by colon to get the IP part (after "IP4.ADDRESS[1]:")
+                            if ":" in output:
+                                ip_part = output.split(":", 1)[1]
+                                # Split by "/" to get just the IP address
+                                ip_address = ip_part.split("/")[0]
+                            else:
+                                # Fallback: try splitting by "/" directly
+                                ip_address = output.split("/")[0]
+                        break
+    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as exc:
+        LOGGER.debug("nmcli not available or failed: %s", exc)
+    
+    # If nmcli didn't work, try iwconfig
+    if not connected:
+        try:
+            result = subprocess.run(
+                ["iwconfig"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.split("\n"):
+                    if "ESSID:" in line:
+                        try:
+                            essid_part = line.split("ESSID:")[1].strip()
+                            if essid_part and essid_part != "off/any":
+                                network_name = essid_part.strip('"')
+                                connected = True
+                        except (IndexError, ValueError):
+                            pass
+        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as exc:
+            LOGGER.debug("iwconfig not available or failed: %s", exc)
+    
+    # Get IP address from network interfaces if not already found
+    if connected and not ip_address:
+        try:
+            # Try to get IP from common WiFi interfaces
+            for interface in ["wlan0", "wlp2s0", "wlp3s0"]:
+                try:
+                    result = subprocess.run(
+                        ["ip", "-4", "addr", "show", interface],
+                        capture_output=True,
+                        text=True,
+                        timeout=1,
+                    )
+                    if result.returncode == 0:
+                        for line in result.stdout.split("\n"):
+                            if "inet " in line:
+                                parts = line.strip().split()
+                                if len(parts) >= 2:
+                                    ip_address = parts[1].split("/")[0]
+                                    break
+                        if ip_address:
+                            break
+                except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+                    continue
+        except Exception as exc:
+            LOGGER.debug("Failed to get IP from network interfaces: %s", exc)
+    
+    # Fallback: try socket to get default route IP
+    if connected and not ip_address:
+        try:
+            # Connect to a remote address to determine local IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip_address = s.getsockname()[0]
+            s.close()
+        except Exception as exc:
+            LOGGER.debug("Failed to get IP via socket: %s", exc)
+    
+    return connected, network_name, ip_address
+
+
+@app.get("/wifi/status", response_model=WiFiStatusResponse, tags=["Connectivity"])
+async def get_wifi_status() -> WiFiStatusResponse:
+    """Get WiFi connection status including connection state, network name, and IP address."""
+    connected, network_name, ip_address = await anyio.to_thread.run_sync(_get_wifi_status)
+    return WiFiStatusResponse(
+        connected=connected,
+        network_name=network_name,
+        ip=ip_address,
+    )
 
 
 @app.post("/wifi/connect", response_model=WiFiConnectResponse, tags=["Connectivity"])
