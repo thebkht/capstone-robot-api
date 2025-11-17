@@ -69,6 +69,21 @@ class HeadCommand(BaseModel):
     tilt: float = Field(..., description="Tilt angle in degrees")
 
 
+class LightCommand(BaseModel):
+    pwmA: conint(ge=0, le=255) = Field(..., description="PWM level for IO4 (0-255)")
+    pwmB: conint(ge=0, le=255) = Field(..., description="PWM level for IO5 (0-255)")
+
+
+class NodCommand(BaseModel):
+    times: conint(ge=1, le=20) = Field(3, description="Number of nod cycles to perform")
+    center_tilt: conint(ge=0, le=180) = Field(
+        15, description="Neutral tilt angle to center the nod motion"
+    )
+    delta: conint(ge=0, le=90) = Field(15, description="Tilt delta from neutral")
+    pan: conint(ge=0, le=180) = Field(90, description="Pan angle to hold during nod")
+    delay: confloat(ge=0, le=5) = Field(0.35, description="Delay between nod movements")
+
+
 class ModeResponse(BaseModel):
     mode: Mode
 

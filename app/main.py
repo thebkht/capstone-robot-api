@@ -113,9 +113,11 @@ from .models import (
     ClaimRequestResponse,
     HeadCommand,
     HealthResponse,
+    LightCommand,
     Mode,
     ModeResponse,
     MoveCommand,
+    NodCommand,
     NetworkInfoResponse,
     StatusResponse,
     StopResponse,
@@ -745,6 +747,61 @@ async def stop_robot(
 
 @app.post("/control/head", response_model=HeadCommand, tags=["Control"])
 async def move_head(command: HeadCommand) -> HeadCommand:
+    return command
+
+
+@app.post("/control/lights", response_model=LightCommand, tags=["Control"])
+async def control_lights(
+    command: LightCommand,
+    x_control_token: str = Header(..., alias="x-control-token"),
+    session_id: str = Header(..., alias="session-id"),
+) -> LightCommand:
+    base_controller = _get_base_controller()
+
+    if not base_controller:
+        raise HTTPException(status_code=503, detail="controller_unavailable")
+
+    if not hasattr(base_controller, "lights_ctrl"):
+        raise HTTPException(status_code=501, detail="lights_control_not_supported")
+
+    try:
+        await anyio.to_thread.run_sync(
+            base_controller.lights_ctrl, command.pwmA, command.pwmB
+        )
+    except Exception as exc:  # pragma: no cover - hardware dependent
+        LOGGER.error("Failed to control lights: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="lights_control_failed")
+
+    return command
+
+
+@app.post("/control/nod", response_model=NodCommand, tags=["Control"])
+async def nod(
+    command: NodCommand,
+    x_control_token: str = Header(..., alias="x-control-token"),
+    session_id: str = Header(..., alias="session-id"),
+) -> NodCommand:
+    base_controller = _get_base_controller()
+
+    if not base_controller:
+        raise HTTPException(status_code=503, detail="controller_unavailable")
+
+    if not hasattr(base_controller, "nod"):
+        raise HTTPException(status_code=501, detail="nod_not_supported")
+
+    try:
+        await anyio.to_thread.run_sync(
+            base_controller.nod,
+            command.times,
+            command.center_tilt,
+            command.delta,
+            command.pan,
+            command.delay,
+        )
+    except Exception as exc:  # pragma: no cover - hardware dependent
+        LOGGER.error("Failed to execute nod command: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="nod_failed")
+
     return command
 
 
