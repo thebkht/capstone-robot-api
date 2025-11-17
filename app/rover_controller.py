@@ -85,6 +85,57 @@ class Rover:
         cmd = f'{{"T":133,"X":{pan},"Y":{tilt},"SPD":0,"ACC":0}}\r\n'
         self.ser.write(cmd.encode())
         time.sleep(0.05)  # Small delay for servo movement
+        
+    def nod(self, times: int = 3, center_tilt: int = 15, delta: int = 15,
+            pan: int = 90, delay: float = 0.35):
+        """
+        Perform a nodding motion with the camera gimbal.
+
+        Args:
+            times: how many nod cycles
+            center_tilt: neutral tilt angle (default ~looking forward)
+            delta: how much to move up/down from center (degrees)
+            pan: pan angle to keep during nod (default center)
+            delay: pause between movements (seconds)
+        """
+        # Clamp angles
+        center_tilt = max(0, min(180, int(center_tilt)))
+        delta = max(0, int(delta))
+
+        up = max(0, min(180, center_tilt + delta))
+        down = max(0, min(180, center_tilt - delta))
+
+        # Go to neutral first
+        self.set_camera_servo(pan=pan, tilt=center_tilt)
+        time.sleep(0.4)
+
+        for _ in range(times):
+            # look up
+            self.set_camera_servo(pan=pan, tilt=up)
+            time.sleep(delay)
+            # look down
+            self.set_camera_servo(pan=pan, tilt=down)
+            time.sleep(delay)
+
+        # back to neutral
+        self.set_camera_servo(pan=pan, tilt=center_tilt)
+
+    def yes_nod(self, pan: int = 90, center_tilt: int = 15,
+                down_delta: int = 20, delay: float = 0.4):
+        """
+        Single 'yes' nod gesture (down then back to neutral).
+        """
+        center_tilt = max(0, min(180, int(center_tilt)))
+        down = max(0, min(180, center_tilt - abs(int(down_delta))))
+
+        # neutral
+        self.set_camera_servo(pan=pan, tilt=center_tilt)
+        time.sleep(delay)
+        # down
+        self.set_camera_servo(pan=pan, tilt=down)
+        time.sleep(delay)
+        # back up
+        self.set_camera_servo(pan=pan, tilt=center_tilt)
 
     def display_text(self, line_num, text):
         """
@@ -127,6 +178,11 @@ class Rover:
         cmd = '{"T":-3}\r\n'
         self.ser.write(cmd.encode())
         print("[Rover] Display reset to default mode.")
+        
+    def lights_ctrl(self, pwmA = 0, pwmB = 0):
+        cmd = f'{{"T":132,"IO4":{pwmA},"IO5":{pwmB}}}\r\n'
+        self.ser.write(cmd.encode())
+        print("[Rover] Lights on")
     
     def read_feedback(self):
         """
