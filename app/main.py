@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from datetime import datetime
 from typing import Any, AsyncIterator, Optional
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 LOGGER = logging.getLogger("uvicorn.error").getChild(__name__)
 
@@ -160,6 +161,23 @@ _PLACEHOLDER_JPEG = base64.b64decode(
 """.strip()
 )
 app = FastAPI(title="Capstone Robot API", version=APP_VERSION)
+
+# Add before CORS middleware
+app.add_middleware(
+    TrustedHostMiddleware, 
+    allowed_hosts=["*"]
+)
+
+@app.middleware("http")
+async def handle_proxy_headers(request: Request, call_next):
+    # Check if this is coming through Tailscale Funnel
+    if request.headers.get("tailscale-funnel-request"):
+        # Tailscale Funnel sometimes doesn't preserve POST method
+        # Get the intended method from a custom header if available
+        pass
+    
+    response = await call_next(request)
+    return response
 
 app.add_middleware(
     CORSMiddleware,
