@@ -22,7 +22,7 @@ LOGGER = logging.getLogger("uvicorn.error").getChild(__name__)
 
 # Ensure project root is in Python path for imports when running as service
 # This MUST happen before any app.* imports
-_project_root = Path(__file__).parent.parent
+_project_root = Path(__file__).parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
@@ -78,10 +78,10 @@ def _attempt_import(module_name: str, package: str | None = None) -> tuple[bool,
 
 
 _import_failures: list[str] = []
-_candidates: list[tuple[str, str | None]] = [("app.rover_controller", None)]
+_candidates: list[tuple[str, str | None]] = [("rover_controller", None)]
 if __package__:
     _candidates.append((".rover_controller", __package__))
-_candidates.append(("rover_controller", None))
+_candidates.append(("app.rover_controller", None))
 
 for candidate, package in _candidates:
     success, error_msg = _attempt_import(candidate, package)
