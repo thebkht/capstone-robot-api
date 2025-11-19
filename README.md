@@ -55,19 +55,19 @@ export ROVER_SERIAL_DEVICE=/dev/ttyTHS1
 
 On startup the API validates that the device exists and is accessible. The path is also retried lazily the first time the `/claim/request` endpoint is hit, so you can plug the controller in after the service is running.
 
-To launch the service automatically on your Jetson at boot, install the provided systemd unit from `scripts/capstone-robot-api.service`:
+To launch the service automatically on your Jetson at boot, install the provided systemd unit from `scripts/api.service`:
 
-1. Copy the repository to the target location (for example `/home/jetson/capstone-robot-api`).
-2. Adjust the `User`, `WorkingDirectory`, and optional `Environment=` lines in `scripts/capstone-robot-api.service` to match your setup.
+1. Copy the repository to the target location (for example `/home/jetson/rovy/api`).
+2. Adjust the `User`, `WorkingDirectory`, and optional `Environment=` lines in `scripts/api.service` to match your setup.
 3. Install the unit and enable it:
 
    ```bash
-   sudo cp scripts/capstone-robot-api.service /etc/systemd/system/
+   sudo cp scripts/api.service /etc/systemd/system/
    sudo systemctl daemon-reload
-   sudo systemctl enable --now capstone-robot-api.service
+   sudo systemctl enable --now api.service
    ```
 
-You can confirm it started successfully with `systemctl status capstone-robot-api.service` and inspect logs via `journalctl -u capstone-robot-api.service`.
+You can confirm it started successfully with `systemctl status api.service` and inspect logs via `journalctl -u api.service`.
 
 ### Checking logs
 
@@ -75,10 +75,10 @@ The robot API is designed to run under systemd, so the easiest way to review log
 
 ```bash
 # Show the most recent messages and keep following new ones
-sudo journalctl -u capstone-robot-api.service -f
+sudo journalctl -u api.service -f
 
 # Review logs from the current boot only
-sudo journalctl -u capstone-robot-api.service --since "today"
+sudo journalctl -u api.service --since "today"
 ```
 
 If you launched the server manually (for example while developing on a workstation), logs are written to the console. You can stream them with any log follower, such as:
@@ -92,7 +92,7 @@ For more verbose diagnostics, adjust the log level before starting the service:
 
 ```bash
 export LOG_LEVEL=debug
-sudo systemctl restart capstone-robot-api.service
+sudo systemctl restart api.service
 ```
 
 This uses the `scripts/logging.ini` configuration that ships with the project, so any changes you make there will automatically be reflected in both the systemd unit and manual runs.
@@ -106,7 +106,7 @@ Once the service is installed and enabled you can deploy new versions with the f
 3. Restart the service to pick up the changes:
 
    ```bash
-   sudo systemctl restart capstone-robot-api.service
+   sudo systemctl restart api.service
    ```
 
 `scripts/autorun.sh` honours the `LOG_LEVEL` and `LOG_CONFIG` environment variables if you need to adjust logging for troubleshooting. The defaults enable the packaged `scripts/logging.ini`, which surfaces INFO-level camera diagnostics in `journalctl`.

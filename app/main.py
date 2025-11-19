@@ -129,7 +129,7 @@ from .models import (
     WiFiStatusResponse,
 )
 
-APP_NAME = "capstone-robot-api"
+APP_NAME = "rovy-api"
 APP_VERSION = "0.1.0"
 ROBOT_NAME = "rover-01"
 ROBOT_SERIAL = "rovy-01"

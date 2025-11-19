@@ -1,5 +1,5 @@
 [project]
-name = "capstone-robot-api"
+name = "rovy-api"
 version = "0.1.0"
 description = "FastAPI service for rover discovery, telemetry, and control"
 authors = [{ name = "Capstone Team" }]

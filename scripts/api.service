@@ -6,9 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=jetson
-WorkingDirectory=/home/jetson/capstone-robot-api
+WorkingDirectory=/home/jetson/rovy/api
 # Wait for USB devices to settle after boot
-ExecStart=/home/jetson/capstone-robot-api/scripts/autorun.sh
+ExecStart=/home/jetson/rovy/api/scripts/autorun.sh
 Restart=on-failure
 RestartSec=5
 StartLimitBurst=5

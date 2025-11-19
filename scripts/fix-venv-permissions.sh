@@ -13,5 +13,5 @@ source "${VENV_PATH}/bin/activate"
 pip install depthai opencv-python
 
 echo "Done! You can now restart the service:"
-echo "  sudo systemctl restart capstone-robot-api.service"
+echo "  sudo systemctl restart api.service"
 
