@@ -864,12 +864,22 @@ async def get_mode() -> ModeResponse:
 async def get_wifi_status() -> WiFiStatusResponse:
     """Get WiFi connection status including connection state, network name, and IP address."""
     w = WifiManager()
-    connected, network_name, ip_address = await anyio.to_thread.run_sync(w.current_connection)
+    status, network_name, ip_address = await anyio.to_thread.run_sync(w.current_connection)
+
+    # Normalize to proper bool
+    if isinstance(status, bool):
+        connected = status
+    elif isinstance(status, str):
+        connected = status.strip().lower() in {"connected", "online", "yes", "up"}
+    else:
+        connected = False  # safe fallback
+
     return WiFiStatusResponse(
         connected=connected,
-        network_name=network_name,
-        ip=ip_address,
+        network_name=network_name or None,
+        ip=ip_address or None,
     )
+
 
 
 @app.get("/wifi/scan", response_model=WiFiScanResponse, tags=["Connectivity"])
