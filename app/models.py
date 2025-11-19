@@ -106,7 +106,7 @@ class WiFiStatusResponse(BaseModel):
 
 class WiFiNetwork(BaseModel):
     ssid: str = Field(..., description="Network SSID (name)")
-    signal_strength: Optional[int] = Field(None, description="Signal strength in percentage (0-100)")
+    signal: Optional[int] = Field(None, description="Signal strength in percentage (0-100)")
     security: Optional[str] = Field(None, description="Security type (e.g., WPA2, WPA, WEP, Open)")
     frequency: Optional[float] = Field(None, description="Frequency in MHz")
 
@@ -130,3 +130,31 @@ class ClaimConfirmResponse(BaseModel):
 
 class ClaimControlResponse(BaseModel):
     sessionId: str = Field(..., description="Controller session ID")
+
+
+# Face Recognition Models
+class FaceRecognitionResult(BaseModel):
+    name: str = Field(..., description="Recognized person name or 'Unknown'")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Recognition confidence score (0-1)")
+    bbox: Optional[list[int]] = Field(None, description="Face bounding box [x1, y1, x2, y2]")
+
+
+class FaceRecognitionResponse(BaseModel):
+    faces: list[FaceRecognitionResult] = Field(..., description="List of recognized faces")
+    frame_count: int = Field(1, description="Number of faces detected")
+
+
+class AddFaceRequest(BaseModel):
+    name: str = Field(..., description="Name of the person to add")
+    image_base64: Optional[str] = Field(None, description="Base64-encoded image (alternative to file upload)")
+
+
+class AddFaceResponse(BaseModel):
+    success: bool = Field(..., description="Whether face was successfully added")
+    message: str = Field(..., description="Status message")
+    name: str = Field(..., description="Name of the added face")
+
+
+class KnownFacesResponse(BaseModel):
+    faces: list[str] = Field(..., description="List of known face names")
+    count: int = Field(..., description="Number of known faces")

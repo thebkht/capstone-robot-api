@@ -25,9 +25,11 @@ LOGGER = logging.getLogger("uvicorn.error").getChild(__name__)
 _project_root = Path(__file__).parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
+    
+from ble import WifiManager
 
 import anyio
-from fastapi import FastAPI, HTTPException, Header, Query, Request, Response, WebSocket
+from fastapi import FastAPI, HTTPException, Header, Query, Request, Response, WebSocket, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -104,7 +106,19 @@ from .oak_stream import get_video_response as oak_video_response
 from .oak_stream import shutdown as oak_shutdown
 from .oak_stream import ensure_runtime as oak_ensure_runtime
 from .oak_stream import frame_to_jpeg as oak_frame_to_jpeg
+
+# Face recognition service
+try:
+    from .face_recognition_service import FaceRecognitionService, FaceRecognitionError
+    FACE_RECOGNITION_AVAILABLE = True
+except ImportError as exc:
+    LOGGER.warning("Face recognition service not available: %s", exc)
+    FACE_RECOGNITION_AVAILABLE = False
+    FaceRecognitionService = None
+    FaceRecognitionError = None
 from .models import (
+    AddFaceRequest,
+    AddFaceResponse,
     CaptureRequest,
     CaptureResponse,
     CaptureType,
@@ -112,8 +126,10 @@ from .models import (
     ClaimConfirmResponse,
     ClaimControlResponse,
     ClaimRequestResponse,
+    FaceRecognitionResponse,
     HeadCommand,
     HealthResponse,
+    KnownFacesResponse,
     LightCommand,
     Mode,
     ModeResponse,
@@ -457,6 +473,22 @@ def _create_camera_service() -> CameraService:
 
 
 app.state.camera_service = _create_camera_service()
+
+# Initialize face recognition service
+if FACE_RECOGNITION_AVAILABLE:
+    try:
+        known_faces_path = _project_root / "known-faces"
+        app.state.face_recognition = FaceRecognitionService(
+            known_faces_dir=known_faces_path,
+            model_name="arcface_r100_v1",  # Best accuracy model
+            threshold=0.6,  # Similarity threshold (lower = more strict)
+        )
+        LOGGER.info("Face recognition service initialized successfully")
+    except Exception as exc:
+        LOGGER.error("Failed to initialize face recognition service: %s", exc, exc_info=True)
+        app.state.face_recognition = None
+else:
+    app.state.face_recognition = None
 
 
 def _find_serial_device() -> tuple[Optional[str], list[str]]:
@@ -828,127 +860,11 @@ async def get_mode() -> ModeResponse:
     return ModeResponse(mode=Mode.ACCESS_POINT)
 
 
-def _get_wifi_status() -> tuple[bool, Optional[str], Optional[str]]:
-    """Get WiFi connection status, network name, and IP address.
-    
-    Returns:
-        Tuple of (connected: bool, network_name: Optional[str], ip: Optional[str])
-    """
-    connected = False
-    network_name = None
-    ip_address = None
-    
-    # Try nmcli first (NetworkManager)
-    try:
-        # Check for active WiFi connection
-        result = subprocess.run(
-            ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        if result.returncode == 0:
-            for line in result.stdout.strip().split("\n"):
-                if not line:
-                    continue
-                parts = line.split(":")
-                if len(parts) >= 4:
-                    device = parts[0]
-                    device_type = parts[1]
-                    state = parts[2]
-                    connection = parts[3]
-                    # Check if it's a WiFi device and connected
-                    if device_type == "wifi" and state == "connected" and connection:
-                        network_name = connection
-                        connected = True
-                        # Get IP address for this device
-                        ip_result = subprocess.run(
-                            ["nmcli", "-t", "-f", "IP4.ADDRESS", "device", "show", device],
-                            capture_output=True,
-                            text=True,
-                            timeout=1,
-                        )
-                        if ip_result.returncode == 0 and ip_result.stdout.strip():
-                            # Parse format like "IP4.ADDRESS[1]:192.168.200.123/24"
-                            output = ip_result.stdout.strip()
-                            # Split by colon to get the IP part (after "IP4.ADDRESS[1]:")
-                            if ":" in output:
-                                ip_part = output.split(":", 1)[1]
-                                # Split by "/" to get just the IP address
-                                ip_address = ip_part.split("/")[0]
-                            else:
-                                # Fallback: try splitting by "/" directly
-                                ip_address = output.split("/")[0]
-                        break
-    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as exc:
-        LOGGER.debug("nmcli not available or failed: %s", exc)
-    
-    # If nmcli didn't work, try iwconfig
-    if not connected:
-        try:
-            result = subprocess.run(
-                ["iwconfig"],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            if result.returncode == 0:
-                for line in result.stdout.split("\n"):
-                    if "ESSID:" in line:
-                        try:
-                            essid_part = line.split("ESSID:")[1].strip()
-                            if essid_part and essid_part != "off/any":
-                                network_name = essid_part.strip('"')
-                                connected = True
-                        except (IndexError, ValueError):
-                            pass
-        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as exc:
-            LOGGER.debug("iwconfig not available or failed: %s", exc)
-    
-    # Get IP address from network interfaces if not already found
-    if connected and not ip_address:
-        try:
-            # Try to get IP from common WiFi interfaces
-            for interface in ["wlan0", "wlp2s0", "wlp3s0"]:
-                try:
-                    result = subprocess.run(
-                        ["ip", "-4", "addr", "show", interface],
-                        capture_output=True,
-                        text=True,
-                        timeout=1,
-                    )
-                    if result.returncode == 0:
-                        for line in result.stdout.split("\n"):
-                            if "inet " in line:
-                                parts = line.strip().split()
-                                if len(parts) >= 2:
-                                    ip_address = parts[1].split("/")[0]
-                                    break
-                        if ip_address:
-                            break
-                except (subprocess.TimeoutExpired, subprocess.SubprocessError):
-                    continue
-        except Exception as exc:
-            LOGGER.debug("Failed to get IP from network interfaces: %s", exc)
-    
-    # Fallback: try socket to get default route IP
-    if connected and not ip_address:
-        try:
-            # Connect to a remote address to determine local IP
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip_address = s.getsockname()[0]
-            s.close()
-        except Exception as exc:
-            LOGGER.debug("Failed to get IP via socket: %s", exc)
-    
-    return connected, network_name, ip_address
-
-
 @app.get("/wifi/status", response_model=WiFiStatusResponse, tags=["Connectivity"])
 async def get_wifi_status() -> WiFiStatusResponse:
     """Get WiFi connection status including connection state, network name, and IP address."""
-    connected, network_name, ip_address = await anyio.to_thread.run_sync(_get_wifi_status)
+    w = WifiManager()
+    connected, network_name, ip_address = await anyio.to_thread.run_sync(w.current_connection)
     return WiFiStatusResponse(
         connected=connected,
         network_name=network_name,
@@ -956,210 +872,11 @@ async def get_wifi_status() -> WiFiStatusResponse:
     )
 
 
-def _scan_wifi_networks() -> list[WiFiNetwork]:
-    """Scan for available WiFi networks.
-    
-    Returns:
-        List of WiFiNetwork objects
-    """
-    networks: list[WiFiNetwork] = []
-    
-    # Try nmcli first (NetworkManager)
-    try:
-        # Find WiFi device first
-        device_result = subprocess.run(
-            ["nmcli", "-t", "-f", "DEVICE,TYPE", "device", "status"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        wifi_device = None
-        if device_result.returncode == 0:
-            for line in device_result.stdout.strip().split("\n"):
-                if not line:
-                    continue
-                parts = line.split(":")
-                if len(parts) >= 2 and parts[1] == "wifi":
-                    wifi_device = parts[0]
-                    break
-        
-        # Trigger a scan on the WiFi device (or all devices if device not found)
-        if wifi_device:
-            scan_result = subprocess.run(
-                ["nmcli", "device", "wifi", "rescan", wifi_device],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-        else:
-            scan_result = subprocess.run(
-                ["nmcli", "device", "wifi", "rescan"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-        # Don't fail if rescan fails, just use existing scan results
-        # Wait a moment for scan to complete
-        time.sleep(2)
-        
-        # Get list of ALL available networks (not just connected)
-        result = subprocess.run(
-            ["nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY,FREQ", "device", "wifi"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            for line in result.stdout.strip().split("\n"):
-                if not line:
-                    continue
-                parts = line.split(":")
-                if len(parts) >= 1:
-                    ssid = parts[0].strip()
-                    # Skip empty SSIDs only
-                    if not ssid or ssid == "--":
-                        continue
-                    
-                    # Parse signal strength (0-100)
-                    signal_strength = None
-                    if len(parts) >= 2 and parts[1].strip() and parts[1].strip() != "--":
-                        try:
-                            signal_strength = int(parts[1].strip())
-                        except (ValueError, IndexError):
-                            pass
-                    
-                    # Parse security type
-                    security = None
-                    if len(parts) >= 3 and parts[2].strip() and parts[2].strip() != "--":
-                        security = parts[2].strip()
-                    
-                    # Parse frequency (MHz)
-                    frequency = None
-                    if len(parts) >= 4 and parts[3].strip() and parts[3].strip() != "--":
-                        try:
-                            # nmcli returns frequency in MHz
-                            frequency = float(parts[3].strip())
-                        except (ValueError, IndexError):
-                            pass
-                    
-                    networks.append(WiFiNetwork(
-                        ssid=ssid,
-                        signal_strength=signal_strength,
-                        security=security,
-                        frequency=frequency,
-                    ))
-    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as exc:
-        LOGGER.debug("nmcli scan not available or failed: %s", exc)
-    
-    # Also try iwlist to ensure we get all networks (iwlist is often more comprehensive)
-    # This will add any additional networks not found by nmcli
-    try:
-        # Find WiFi interface
-        wifi_interface = None
-        for interface in ["wlan0", "wlp2s0", "wlp3s0"]:
-            try:
-                check_result = subprocess.run(
-                    ["iwconfig", interface],
-                    capture_output=True,
-                    text=True,
-                    timeout=1,
-                )
-                if check_result.returncode == 0:
-                    wifi_interface = interface
-                    break
-            except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
-                continue
-        
-        if wifi_interface:
-            # Scan for networks
-            scan_result = subprocess.run(
-                ["iwlist", wifi_interface, "scan"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if scan_result.returncode == 0:
-                current_ssid = None
-                current_signal = None
-                current_security = None
-                current_freq = None
-                
-                for line in scan_result.stdout.split("\n"):
-                    line = line.strip()
-                    if "ESSID:" in line:
-                        # Save previous network if exists
-                        if current_ssid:
-                            networks.append(WiFiNetwork(
-                                ssid=current_ssid,
-                                signal_strength=current_signal,
-                                security=current_security,
-                                frequency=current_freq,
-                            ))
-                        # Parse new SSID
-                        try:
-                            essid_part = line.split("ESSID:")[1].strip().strip('"')
-                            if essid_part:
-                                current_ssid = essid_part
-                                current_signal = None
-                                current_security = None
-                                current_freq = None
-                        except (IndexError, ValueError):
-                            pass
-                    elif "Signal level=" in line:
-                        try:
-                            # Parse signal level (usually in dBm, convert to percentage approximation)
-                            signal_part = line.split("Signal level=")[1].split()[0]
-                            # iwlist typically gives negative dBm values, convert roughly
-                            if signal_part.replace("-", "").replace(".", "").isdigit():
-                                dbm = float(signal_part)
-                                # Rough conversion: -100dBm = 0%, -50dBm = 100%
-                                signal_strength = max(0, min(100, int(2 * (dbm + 100))))
-                                current_signal = signal_strength
-                        except (ValueError, IndexError):
-                            pass
-                    elif "Encryption key:" in line:
-                        if "on" in line.lower():
-                            current_security = "WEP"  # Default, may be updated
-                        else:
-                            current_security = "Open"
-                    elif "IEEE 802.11" in line or "WPA" in line or "WPA2" in line:
-                        if "WPA2" in line:
-                            current_security = "WPA2"
-                        elif "WPA" in line:
-                            current_security = "WPA"
-                    elif "Frequency:" in line:
-                        try:
-                            freq_part = line.split("Frequency:")[1].split()[0]
-                            # Convert GHz to MHz if needed
-                            if "GHz" in line:
-                                frequency = float(freq_part) * 1000
-                            else:
-                                frequency = float(freq_part)
-                            current_freq = frequency
-                        except (ValueError, IndexError):
-                            pass
-                
-                # Add last network
-                if current_ssid:
-                    networks.append(WiFiNetwork(
-                        ssid=current_ssid,
-                        signal_strength=current_signal,
-                        security=current_security,
-                        frequency=current_freq,
-                    ))
-    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as exc:
-        LOGGER.debug("iwlist scan not available or failed: %s", exc)
-    
-    # Sort by signal strength (strongest first)
-    networks.sort(key=lambda n: n.signal_strength if n.signal_strength is not None else -1, reverse=True)
-    
-    return networks
-
-
 @app.get("/wifi/scan", response_model=WiFiScanResponse, tags=["Connectivity"])
 async def scan_wifi_networks() -> WiFiScanResponse:
+    w = WifiManager()
     """Scan for available WiFi networks and return a list of discovered networks."""
-    networks = await anyio.to_thread.run_sync(_scan_wifi_networks)
+    networks = await anyio.to_thread.run_sync(w.scan_networks)
     return WiFiScanResponse(networks=networks)
 
 
@@ -1168,8 +885,13 @@ async def connect_wifi(request: WiFiConnectRequest) -> WiFiConnectResponse:
     if not request.password:
         raise HTTPException(status_code=400, detail="Password must not be empty")
 
-    message = f"Attempting to connect to {request.ssid}"
-    return WiFiConnectResponse(connecting=True, message=message)
+    LOGGER.info(f"Attempting to connect to {request.ssid}")
+    w = WifiManager()
+    res = await anyio.to_thread.run_sync(
+    lambda: w.connect(ssid=request.ssid, password=request.password)
+)
+
+    return WiFiConnectResponse(connecting=res.success, message=res.message)
 
 
 @app.post("/claim/request", response_model=ClaimRequestResponse, tags=["Claim"])
@@ -1262,3 +984,213 @@ async def claim_control() -> ClaimControlResponse:
     STATE["controller"]["last"] = time.time()
     LOGGER.info("Controller session claimed")
     return ClaimControlResponse(sessionId=session_id)
+
+
+# ============================================================================
+# Face Recognition Endpoints
+# ============================================================================
+
+@app.post("/face-recognition/recognize", response_model=FaceRecognitionResponse, tags=["Face Recognition"])
+async def recognize_faces() -> FaceRecognitionResponse:
+    """Recognize faces in the current camera frame."""
+    if not FACE_RECOGNITION_AVAILABLE or app.state.face_recognition is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Face recognition service not available. Install insightface and onnxruntime."
+        )
+    
+    try:
+        # Get frame from camera
+        frame_bytes = await app.state.camera_service.get_frame()
+        
+        # Decode JPEG to numpy array
+        import cv2
+        import numpy as np
+        nparr = np.frombuffer(frame_bytes, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if frame is None:
+            raise HTTPException(status_code=400, detail="Failed to decode camera frame")
+        
+        # Recognize faces
+        recognitions = await anyio.to_thread.run_sync(
+            app.state.face_recognition.recognize_faces,
+            frame,
+            True,  # return_locations
+        )
+        
+        # Convert to response format
+        from .models import FaceRecognitionResult
+        face_results = [
+            FaceRecognitionResult(
+                name=rec["name"],
+                confidence=rec["confidence"],
+                bbox=rec.get("bbox"),
+            )
+            for rec in recognitions
+        ]
+        
+        return FaceRecognitionResponse(
+            faces=face_results,
+            frame_count=len(face_results),
+        )
+        
+    except FaceRecognitionError as exc:
+        raise HTTPException(status_code=500, detail=f"Face recognition error: {exc}") from exc
+    except Exception as exc:
+        LOGGER.error("Face recognition failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Recognition failed: {exc}") from exc
+
+
+@app.get("/face-recognition/known", response_model=KnownFacesResponse, tags=["Face Recognition"])
+async def get_known_faces() -> KnownFacesResponse:
+    """Get list of all known faces."""
+    if not FACE_RECOGNITION_AVAILABLE or app.state.face_recognition is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Face recognition service not available"
+        )
+    
+    faces = app.state.face_recognition.get_known_faces()
+    return KnownFacesResponse(faces=faces, count=len(faces))
+
+
+@app.post("/face-recognition/add", response_model=AddFaceResponse, tags=["Face Recognition"])
+async def add_face(
+    name: str = Form(...),
+    image: UploadFile = File(None),
+    image_base64: Optional[str] = Form(None),
+) -> AddFaceResponse:
+    """Add a new face to the known faces database.
+    
+    Can accept either:
+    - Form data with 'image' file upload and 'name' field
+    - Form data with 'image_base64' (base64-encoded image) and 'name' field
+    """
+    if not FACE_RECOGNITION_AVAILABLE or app.state.face_recognition is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Face recognition service not available"
+        )
+    
+    try:
+        import cv2
+        import numpy as np
+        
+        # Decode image
+        if image and image.filename:
+            # From file upload
+            image_bytes = await image.read()
+            nparr = np.frombuffer(image_bytes, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        elif image_base64:
+            # From base64
+            image_data = base64.b64decode(image_base64)
+            nparr = np.frombuffer(image_data, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        else:
+            raise HTTPException(status_code=400, detail="No image provided. Use file upload or image_base64 field.")
+        
+        if frame is None:
+            raise HTTPException(status_code=400, detail="Failed to decode image")
+        
+        # Add face
+        success = await anyio.to_thread.run_sync(
+            app.state.face_recognition.add_known_face,
+            name,
+            frame,
+        )
+        
+        if not success:
+            raise HTTPException(status_code=400, detail="No face detected in image")
+        
+        return AddFaceResponse(
+            success=True,
+            message=f"Face for '{name}' added successfully",
+            name=name,
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.error("Failed to add face: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to add face: {exc}") from exc
+
+
+@app.post("/face-recognition/reload", tags=["Face Recognition"])
+async def reload_known_faces() -> dict[str, str]:
+    """Reload known faces from disk."""
+    if not FACE_RECOGNITION_AVAILABLE or app.state.face_recognition is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Face recognition service not available"
+        )
+    
+    try:
+        await anyio.to_thread.run_sync(app.state.face_recognition.reload_known_faces)
+        return {"status": "success", "message": "Known faces reloaded"}
+    except Exception as exc:
+        LOGGER.error("Failed to reload faces: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to reload: {exc}") from exc
+
+
+@app.get("/face-recognition/stream", tags=["Face Recognition"])
+async def face_recognition_stream() -> StreamingResponse:
+    """Stream camera feed with face recognition overlay."""
+    if not FACE_RECOGNITION_AVAILABLE or app.state.face_recognition is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Face recognition service not available"
+        )
+    
+    async def stream_generator() -> AsyncIterator[bytes]:
+        import cv2
+        import numpy as np
+        
+        try:
+            while True:
+                # Get frame from camera
+                frame_bytes = await app.state.camera_service.get_frame()
+                
+                # Decode JPEG
+                nparr = np.frombuffer(frame_bytes, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                
+                if frame is not None:
+                    # Recognize faces
+                    recognitions = await anyio.to_thread.run_sync(
+                        app.state.face_recognition.recognize_faces,
+                        frame,
+                        True,
+                    )
+                    
+                    # Draw recognitions on frame
+                    annotated_frame = await anyio.to_thread.run_sync(
+                        app.state.face_recognition.draw_recognitions,
+                        frame,
+                        recognitions,
+                    )
+                    
+                    # Encode back to JPEG
+                    _, encoded = cv2.imencode(".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    payload = encoded.tobytes()
+                else:
+                    payload = frame_bytes  # Fallback to original
+                
+                # Send frame
+                header = (
+                    f"--{BOUNDARY}\r\n"
+                    "Content-Type: image/jpeg\r\n"
+                    f"Content-Length: {len(payload)}\r\n\r\n"
+                ).encode()
+                yield header + payload + b"\r\n"
+                
+                await anyio.sleep(0.1)  # ~10 FPS
+                
+        except Exception as exc:
+            LOGGER.error("Face recognition stream error: %s", exc, exc_info=True)
+    
+    return StreamingResponse(
+        stream_generator(),
+        media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY}",
+    )
